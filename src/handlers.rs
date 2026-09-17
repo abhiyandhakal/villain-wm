@@ -123,3 +123,28 @@ smithay::delegate_output!(Villain);
 smithay::delegate_seat!(Villain);
 smithay::delegate_shm!(Villain);
 smithay::delegate_xdg_shell!(Villain);
+
+impl smithay::wayland::dmabuf::DmabufHandler for Villain {
+    fn dmabuf_state(&mut self) -> &mut smithay::wayland::dmabuf::DmabufState {
+        &mut self.dmabuf_state
+    }
+
+    fn dmabuf_imported(
+        &mut self,
+        _global: &smithay::wayland::dmabuf::DmabufGlobal,
+        dmabuf: smithay::backend::allocator::dmabuf::Dmabuf,
+        notifier: smithay::wayland::dmabuf::ImportNotifier,
+    ) {
+        use smithay::backend::renderer::ImportDma;
+        if self
+            .tty
+            .as_mut()
+            .is_some_and(|tty| tty.renderer.import_dmabuf(&dmabuf, None).is_ok())
+        {
+            let _ = notifier.successful::<Self>();
+        } else {
+            notifier.failed();
+        }
+    }
+}
+smithay::delegate_dmabuf!(Villain);

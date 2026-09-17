@@ -1,10 +1,7 @@
 //! Compositor shortcuts are consumed; ordinary keys reach the active app.
 use crate::state::Villain;
 use smithay::{
-    backend::{
-        input::{Event, KeyState, KeyboardKeyEvent},
-        winit::WinitKeyboardInputEvent,
-    },
+    backend::input::{InputBackend, KeyState, KeyboardKeyEvent},
     input::keyboard::{FilterResult, keysyms},
     utils::SERIAL_COUNTER,
 };
@@ -13,6 +10,8 @@ use smithay::{
 enum Action {
     Terminal,
     Workspace(usize),
+    Quit,
+    Vt(i32),
 }
 
 fn binding(sym: u32, active: usize) -> Option<Action> {
@@ -26,7 +25,10 @@ fn binding(sym: u32, active: usize) -> Option<Action> {
     }
 }
 
-pub fn handle_keyboard_event(state: &mut Villain, event: WinitKeyboardInputEvent) {
+pub fn handle_keyboard_event<B: InputBackend>(
+    state: &mut Villain,
+    event: impl KeyboardKeyEvent<B>,
+) {
     let code = event.key_code();
     let pressed = event.state() == KeyState::Pressed;
     let keyboard = state.keyboard.clone();
@@ -45,6 +47,30 @@ pub fn handle_keyboard_event(state: &mut Villain, event: WinitKeyboardInputEvent
             }
             if pressed {
                 tracing::debug!(?code, sym = ?key.modified_sym(), "key pressed");
+            }
+            if pressed && mods.ctrl && mods.alt {
+                let sym = key.modified_sym().raw();
+                let action = if key
+                    .raw_syms()
+                    .iter()
+                    .any(|sym| sym.raw() == keysyms::KEY_BackSpace)
+                {
+                    Some(Action::Quit)
+                } else if state.tty.is_some()
+                    && (keysyms::KEY_XF86Switch_VT_1..=keysyms::KEY_XF86Switch_VT_12).contains(&sym)
+                {
+                    Some(Action::Vt((sym - keysyms::KEY_XF86Switch_VT_1 + 1) as i32))
+                } else {
+                    key.raw_syms().iter().find_map(|sym| {
+                        (state.tty.is_some()
+                            && (keysyms::KEY_F1..=keysyms::KEY_F12).contains(&sym.raw()))
+                        .then(|| Action::Vt((sym.raw() - keysyms::KEY_F1 + 1) as i32))
+                    })
+                };
+                if let Some(action) = action {
+                    state.suppressed_keys.insert(code);
+                    return FilterResult::Intercept(Some(action));
+                }
             }
             if pressed
                 && mods.alt
@@ -65,6 +91,15 @@ pub fn handle_keyboard_event(state: &mut Villain, event: WinitKeyboardInputEvent
     match action.flatten() {
         Some(Action::Terminal) => state.launch_terminal(),
         Some(Action::Workspace(index)) => state.switch_workspace(index),
+        Some(Action::Quit) => state.loop_signal.stop(),
+        Some(Action::Vt(vt)) => {
+            use smithay::backend::session::Session;
+            if let Some(tty) = state.tty.as_mut()
+                && let Err(error) = tty.session.change_vt(vt)
+            {
+                tracing::warn!(%error, "VT switch failed");
+            }
+        }
         None => {}
     }
 }

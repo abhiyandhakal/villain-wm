@@ -1,14 +1,14 @@
 //! Villain, a deliberately small Smithay compositor.
 //!
-//! The first version is a nested compositor: Smithay opens a window on the
-//! existing desktop, and Villain serves Wayland clients inside that window.
-//! This keeps the first experiment safe to run while exposing the same core
-//! pieces that a direct-to-DRM compositor will eventually need.
+//! Winit runs nested in a desktop; the TTY backend owns a Linux seat and output.
+//! Both backends use the same Wayland protocol and workspace state.
 
+mod backend_selection;
 mod handlers;
 mod keybinds;
 mod render;
 mod state;
+mod tty;
 mod workspaces;
 
 use smithay::reexports::{calloop::EventLoop, wayland_server::Display};
@@ -17,13 +17,32 @@ use state::Villain;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_logging();
 
-    // calloop owns the central event loop. Every event source—Wayland client
-    // requests, the nested window, and later input devices—feeds into it.
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    let direct = match args.as_slice() {
+        [] => backend_selection::default_is_direct(),
+        [arg] if arg == "--tty" => true,
+        [arg] if arg == "--winit" => false,
+        [arg] if arg == "--help" => {
+            println!(
+                "villain [--tty | --winit]\nDefault: Winit inside a desktop, DRM/KMS from a TTY."
+            );
+            return Ok(());
+        }
+        _ => return Err("usage: villain [--tty | --winit]".into()),
+    };
+    tracing::info!(
+        backend = if direct { "tty" } else { "winit" },
+        "selected backend"
+    );
+    // Parse options before creating sockets so --help works without a session.
     let mut event_loop: EventLoop<Villain> = EventLoop::try_new()?;
     let display = Display::new()?;
     let mut state = Villain::new(&mut event_loop, display);
-
-    render::init_winit(&mut event_loop, &mut state)?;
+    if direct {
+        tty::init(&mut event_loop, &mut state)?;
+    } else {
+        render::init_winit(&mut event_loop, &mut state)?;
+    }
 
     tracing::info!(socket = ?state.socket_name, "Villain is ready");
     event_loop.run(

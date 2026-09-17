@@ -27,6 +27,8 @@ use smithay::{
 /// mutable reference to it into callbacks, so the first version does not need
 /// `Arc<Mutex<_>>` for its own state.
 pub struct Villain {
+    pub tty: Option<crate::tty::Tty>,
+    pub dmabuf_state: smithay::wayland::dmabuf::DmabufState,
     pub display_handle: DisplayHandle,
     pub socket_name: OsString,
     pub start_time: Instant,
@@ -70,6 +72,8 @@ impl Villain {
         let pointer = seat.add_pointer();
 
         Self {
+            tty: None,
+            dmabuf_state: smithay::wayland::dmabuf::DmabufState::new(),
             display_handle: display_handle.clone(),
             socket_name,
             start_time: Instant::now(),
