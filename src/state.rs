@@ -15,6 +15,7 @@ use smithay::{
     wayland::{
         compositor::{CompositorClientState, CompositorState},
         output::OutputManagerState,
+        selection::data_device::DataDeviceState,
         shell::xdg::XdgShellState,
         shm::ShmState,
         socket::ListeningSocketSource,
@@ -44,6 +45,7 @@ pub struct Villain {
     pub compositor_state: CompositorState,
     pub xdg_shell_state: XdgShellState,
     pub shm_state: ShmState,
+    pub data_device_state: DataDeviceState,
     #[allow(dead_code)]
     pub output_manager_state: OutputManagerState,
 
@@ -66,6 +68,10 @@ impl Villain {
     pub fn new(event_loop: &mut EventLoop<Self>, display: Display<Self>) -> Self {
         let display_handle = display.handle();
         let socket_name = init_wayland_listener(display, event_loop);
+        // GTK only exposes a default GdkSeat after it has both wl_seat and
+        // wl_data_device_manager. Advertise the selection manager first so
+        // clients can construct a complete seat as globals arrive.
+        let data_device_state = DataDeviceState::new::<Self>(&display_handle);
         let mut seat_state = SeatState::new();
         let mut seat = seat_state.new_wl_seat(&display_handle, "villain");
         let keyboard = seat
@@ -84,6 +90,7 @@ impl Villain {
             compositor_state: CompositorState::new::<Self>(&display_handle),
             xdg_shell_state: XdgShellState::new::<Self>(&display_handle),
             shm_state: ShmState::new::<Self>(&display_handle, vec![]),
+            data_device_state,
             output_manager_state: OutputManagerState::new_with_xdg_output::<Self>(&display_handle),
             seat_state,
             keyboard,

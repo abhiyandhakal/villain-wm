@@ -59,6 +59,11 @@ impl Villain {
         match Command::new(&program)
             .env("WAYLAND_DISPLAY", &self.socket_name)
             .env_remove("WAYLAND_SOCKET")
+            // A shell started from a desktop terminal can inherit the host's
+            // X11 display and a forced GTK backend. Neither describes the
+            // session that Villain is providing to this child.
+            .env_remove("DISPLAY")
+            .env_remove("GDK_BACKEND")
             .spawn()
         {
             Ok(child) => {

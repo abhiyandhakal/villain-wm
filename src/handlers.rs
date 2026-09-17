@@ -17,7 +17,18 @@ use smithay::{
         shm::{ShmHandler, ShmState},
     },
 };
-use smithay::{reexports::wayland_server::protocol::wl_seat, utils::Serial};
+use smithay::{
+    input::Seat,
+    reexports::wayland_server::protocol::wl_seat,
+    utils::Serial,
+    wayland::selection::{
+        SelectionHandler,
+        data_device::{
+            ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
+        },
+    },
+};
+use std::os::fd::OwnedFd;
 
 use crate::state::{ClientState, Villain};
 
@@ -71,6 +82,22 @@ impl ShmHandler for Villain {
     }
 }
 
+impl SelectionHandler for Villain {
+    type SelectionUserData = ();
+}
+
+impl DataDeviceHandler for Villain {
+    fn data_device_state(&self) -> &DataDeviceState {
+        &self.data_device_state
+    }
+}
+
+impl ClientDndGrabHandler for Villain {}
+
+impl ServerDndGrabHandler for Villain {
+    fn send(&mut self, _mime_type: String, _fd: OwnedFd, _seat: Seat<Self>) {}
+}
+
 impl OutputHandler for Villain {}
 
 impl XdgShellHandler for Villain {
@@ -104,6 +131,7 @@ impl XdgShellHandler for Villain {
 // above. It is intentionally at the bottom: the implementations are easier to
 // find before the generated dispatch glue.
 smithay::delegate_compositor!(Villain);
+smithay::delegate_data_device!(Villain);
 smithay::delegate_output!(Villain);
 smithay::delegate_seat!(Villain);
 smithay::delegate_shm!(Villain);
