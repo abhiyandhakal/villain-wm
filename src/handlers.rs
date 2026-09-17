@@ -26,6 +26,9 @@ use smithay::{
         data_device::{
             ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
         },
+        ext_data_control,
+        primary_selection::{PrimarySelectionHandler, PrimarySelectionState},
+        wlr_data_control,
     },
 };
 use std::os::fd::OwnedFd;
@@ -93,6 +96,24 @@ impl DataDeviceHandler for Villain {
     }
 }
 
+impl PrimarySelectionHandler for Villain {
+    fn primary_selection_state(&self) -> &PrimarySelectionState {
+        &self.primary_selection_state
+    }
+}
+
+impl wlr_data_control::DataControlHandler for Villain {
+    fn data_control_state(&self) -> &wlr_data_control::DataControlState {
+        &self.wlr_data_control_state
+    }
+}
+
+impl ext_data_control::DataControlHandler for Villain {
+    fn data_control_state(&self) -> &ext_data_control::DataControlState {
+        &self.ext_data_control_state
+    }
+}
+
 impl ClientDndGrabHandler for Villain {}
 
 impl ServerDndGrabHandler for Villain {
@@ -138,7 +159,10 @@ impl XdgShellHandler for Villain {
 smithay::delegate_compositor!(Villain);
 smithay::delegate_cursor_shape!(Villain);
 smithay::delegate_data_device!(Villain);
+smithay::delegate_data_control!(Villain);
+smithay::delegate_ext_data_control!(Villain);
 smithay::delegate_output!(Villain);
+smithay::delegate_primary_selection!(Villain);
 smithay::delegate_seat!(Villain);
 smithay::delegate_shm!(Villain);
 smithay::delegate_xdg_shell!(Villain);

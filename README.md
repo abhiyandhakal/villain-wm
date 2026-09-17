@@ -262,6 +262,11 @@ client-provided cursor surfaces and the standard cursor-shape protocol, loading
 named shapes from `XCURSOR_THEME` at `XCURSOR_SIZE` when those variables are
 set. The host compositor's cursor is hidden while it is over the nested output.
 
+Clipboard state is local to Villain, including when it runs nested inside
+another compositor. Standard clipboard, primary selection, and data-control
+protocols are available so ordinary applications and clipboard managers can
+exchange selections without leaking them into the host session.
+
 ---
 
 ## Architecture

@@ -9,7 +9,7 @@ use smithay::{
         calloop::{EventLoop, Interest, LoopSignal, Mode, PostAction, generic::Generic},
         wayland_protocols::xdg::shell::server::xdg_toplevel,
         wayland_server::{
-            Display, DisplayHandle,
+            Display, DisplayHandle, Resource,
             backend::{ClientData, ClientId, DisconnectReason},
         },
     },
@@ -17,7 +17,12 @@ use smithay::{
         compositor::{CompositorClientState, CompositorState},
         cursor_shape::CursorShapeManagerState,
         output::OutputManagerState,
-        selection::data_device::DataDeviceState,
+        selection::{
+            data_device::{DataDeviceState, set_data_device_focus},
+            ext_data_control,
+            primary_selection::{PrimarySelectionState, set_primary_focus},
+            wlr_data_control,
+        },
         shell::xdg::XdgShellState,
         shm::ShmState,
         socket::ListeningSocketSource,
@@ -49,6 +54,9 @@ pub struct Villain {
     pub xdg_shell_state: XdgShellState,
     pub shm_state: ShmState,
     pub data_device_state: DataDeviceState,
+    pub primary_selection_state: PrimarySelectionState,
+    pub wlr_data_control_state: wlr_data_control::DataControlState,
+    pub ext_data_control_state: ext_data_control::DataControlState,
     #[allow(dead_code)]
     pub cursor_shape_state: CursorShapeManagerState,
     #[allow(dead_code)]
@@ -78,6 +86,17 @@ impl Villain {
         // wl_data_device_manager. Advertise the selection manager first so
         // clients can construct a complete seat as globals arrive.
         let data_device_state = DataDeviceState::new::<Self>(&display_handle);
+        let primary_selection_state = PrimarySelectionState::new::<Self>(&display_handle);
+        let wlr_data_control_state = wlr_data_control::DataControlState::new::<Self, _>(
+            &display_handle,
+            Some(&primary_selection_state),
+            |_| true,
+        );
+        let ext_data_control_state = ext_data_control::DataControlState::new::<Self, _>(
+            &display_handle,
+            Some(&primary_selection_state),
+            |_| true,
+        );
         let mut seat_state = SeatState::new();
         let mut seat = seat_state.new_wl_seat(&display_handle, "villain");
         let keyboard = seat
@@ -102,6 +121,9 @@ impl Villain {
             ),
             shm_state: ShmState::new::<Self>(&display_handle, vec![]),
             data_device_state,
+            primary_selection_state,
+            wlr_data_control_state,
+            ext_data_control_state,
             cursor_shape_state: CursorShapeManagerState::new::<Self>(&display_handle),
             output_manager_state: OutputManagerState::new_with_xdg_output::<Self>(&display_handle),
             seat_state,
@@ -135,6 +157,16 @@ impl SeatHandler for Villain {
         image: smithay::input::pointer::CursorImageStatus,
     ) {
         self.cursor.set_image(image, self.start_time.elapsed());
+    }
+
+    fn focus_changed(
+        &mut self,
+        seat: &smithay::input::Seat<Self>,
+        focused: Option<&Self::KeyboardFocus>,
+    ) {
+        let client = focused.and_then(Resource::client);
+        set_data_device_focus(&self.display_handle, seat, client.clone());
+        set_primary_focus(&self.display_handle, seat, client);
     }
 }
 
