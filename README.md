@@ -273,6 +273,22 @@ exchange selections without leaking them into the host session.
 
 Villain conceptually separates compositor mechanism from window-management policy.
 
+Keyboard shortcuts and external clients share one imperative dispatcher. IPC
+queries inspect state directly; they are not dispatcher actions.
+
+```text
+keyboard -> keybind matching --+
+                              +-> dispatcher -> compositor state
+villainctl -> IPC dispatch ---+
+villainctl -> IPC query ----------------------> compositor state
+```
+
+The Cargo workspace currently contains three packages:
+
+* `villain` — the compositor, dispatcher, window state, and IPC server
+* `villain-ipc` — Smithay-independent serializable types and client code
+* `villainctl` — a thin command-line IPC client
+
 ```text
 Wayland clients
       │
@@ -350,7 +366,40 @@ Conceptually:
 
 Shell surfaces such as panels, launchers, and overlays are not normal application windows and should not participate in ordinary tiling layouts.
 
-Villain and `abhishell` may eventually use a private protocol or IPC interface for functionality that cannot appropriately be exposed to arbitrary Wayland clients.
+Villain exposes its window-management state and actions to `abhishell` through
+the IPC interface below. Wayland protocols remain the interface for ordinary
+client and shell-surface behavior.
+
+### IPC and `villainctl`
+
+Villain listens on a user-only Unix socket scoped to its Wayland display:
+
+```text
+$XDG_RUNTIME_DIR/villain-$WAYLAND_DISPLAY.sock
+```
+
+Requests and responses are JSON Lines. Workspace numbers at the IPC boundary
+are one-based. Window IDs are monotonic for the lifetime of the compositor and
+are not reused.
+
+Initial commands include:
+
+```console
+villainctl dispatch workspace 2
+villainctl dispatch minimize
+villainctl dispatch focus-window 1
+villainctl dispatch restore-window 1
+villainctl dispatch exec kitty
+
+villainctl windows
+villainctl workspaces
+villainctl active-window
+villainctl active-workspace
+villainctl version
+```
+
+`villainctl` discovers the compositor through `WAYLAND_DISPLAY`. Set
+`VILLAIN_SOCKET` only when an explicit socket override is needed.
 
 ---
 

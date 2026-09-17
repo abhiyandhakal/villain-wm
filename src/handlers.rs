@@ -71,7 +71,9 @@ impl CompositorHandler for Villain {
             if !initial_configure_sent {
                 window.toplevel().unwrap().send_configure();
             }
-            self.refresh_pointer(0);
+            // A repaint can change the pointer's surface-local coordinates,
+            // but it must not override focus chosen by a dispatcher.
+            self.refresh_pointer_surface(0);
         }
     }
 }

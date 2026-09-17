@@ -1,5 +1,5 @@
 //! Compositor shortcuts are consumed; ordinary keys reach the active app.
-use crate::state::Villain;
+use crate::{dispatch::Dispatch, state::Villain};
 use smithay::{
     backend::input::{InputBackend, KeyState, KeyboardKeyEvent},
     input::keyboard::{FilterResult, keysyms},
@@ -7,27 +7,26 @@ use smithay::{
 };
 
 #[derive(Debug, PartialEq)]
-enum Action {
-    Close,
-    Minimize,
-    RestoreMinimized,
-    Terminal,
-    Workspace(usize),
-    Quit,
+enum KeyboardAction {
+    Dispatch(Dispatch),
     Vt(i32),
 }
 
-fn binding(sym: u32, active: usize, shift: bool) -> Option<Action> {
+fn binding(sym: u32, active: usize, shift: bool) -> Option<Dispatch> {
     match sym {
-        keysyms::KEY_q if !shift => Some(Action::Close),
-        keysyms::KEY_m if !shift => Some(Action::Minimize),
-        keysyms::KEY_m if shift => Some(Action::RestoreMinimized),
+        keysyms::KEY_q if !shift => Some(Dispatch::CloseFocused),
+        keysyms::KEY_m if !shift => Some(Dispatch::MinimizeFocused),
+        keysyms::KEY_m if shift => Some(Dispatch::RestoreLastMinimized),
         _ if shift => None,
-        keysyms::KEY_Return | keysyms::KEY_KP_Enter => Some(Action::Terminal),
-        keysyms::KEY_1..=keysyms::KEY_9 => Some(Action::Workspace((sym - keysyms::KEY_1) as usize)),
-        keysyms::KEY_0 => Some(Action::Workspace(9)),
-        keysyms::KEY_Left => Some(Action::Workspace((active + 9) % 10)),
-        keysyms::KEY_Right => Some(Action::Workspace((active + 1) % 10)),
+        keysyms::KEY_Return | keysyms::KEY_KP_Enter => Some(Dispatch::Spawn(vec![
+            std::env::var("VILLAIN_TERMINAL").unwrap_or_else(|_| "kitty".into()),
+        ])),
+        keysyms::KEY_1..=keysyms::KEY_9 => Some(Dispatch::FocusWorkspace(
+            (sym - keysyms::KEY_1) as usize + 1,
+        )),
+        keysyms::KEY_0 => Some(Dispatch::FocusWorkspace(10)),
+        keysyms::KEY_Left => Some(Dispatch::FocusWorkspace((active + 9) % 10 + 1)),
+        keysyms::KEY_Right => Some(Dispatch::FocusWorkspace((active + 1) % 10 + 1)),
         _ => None,
     }
 }
@@ -62,16 +61,18 @@ pub fn handle_keyboard_event<B: InputBackend>(
                     .iter()
                     .any(|sym| sym.raw() == keysyms::KEY_BackSpace)
                 {
-                    Some(Action::Quit)
+                    Some(KeyboardAction::Dispatch(Dispatch::Quit))
                 } else if state.tty.is_some()
                     && (keysyms::KEY_XF86Switch_VT_1..=keysyms::KEY_XF86Switch_VT_12).contains(&sym)
                 {
-                    Some(Action::Vt((sym - keysyms::KEY_XF86Switch_VT_1 + 1) as i32))
+                    Some(KeyboardAction::Vt(
+                        (sym - keysyms::KEY_XF86Switch_VT_1 + 1) as i32,
+                    ))
                 } else {
                     key.raw_syms().iter().find_map(|sym| {
                         (state.tty.is_some()
                             && (keysyms::KEY_F1..=keysyms::KEY_F12).contains(&sym.raw()))
-                        .then(|| Action::Vt((sym.raw() - keysyms::KEY_F1 + 1) as i32))
+                        .then(|| KeyboardAction::Vt((sym.raw() - keysyms::KEY_F1 + 1) as i32))
                     })
                 };
                 if let Some(action) = action {
@@ -89,19 +90,18 @@ pub fn handle_keyboard_event<B: InputBackend>(
                     .find_map(|sym| binding(sym.raw(), state.active_workspace, mods.shift))
             {
                 state.suppressed_keys.insert(code);
-                return FilterResult::Intercept(Some(action));
+                return FilterResult::Intercept(Some(KeyboardAction::Dispatch(action)));
             }
             FilterResult::Forward
         },
     );
     match action.flatten() {
-        Some(Action::Close) => state.close_focused_window(),
-        Some(Action::Minimize) => state.minimize_focused_window(),
-        Some(Action::RestoreMinimized) => state.restore_last_minimized_window(),
-        Some(Action::Terminal) => state.launch_terminal(),
-        Some(Action::Workspace(index)) => state.switch_workspace(index),
-        Some(Action::Quit) => state.loop_signal.stop(),
-        Some(Action::Vt(vt)) => {
+        Some(KeyboardAction::Dispatch(dispatch)) => {
+            if let Err(error) = state.dispatch(dispatch) {
+                tracing::debug!(%error, "keybind dispatch had no effect");
+            }
+        }
+        Some(KeyboardAction::Vt(vt)) => {
             use smithay::backend::session::Session;
             if let Some(tty) = state.tty.as_mut()
                 && let Err(error) = tty.session.change_vt(vt)
@@ -120,29 +120,37 @@ mod tests {
     fn workspace_numbers_and_wraparound() {
         assert_eq!(
             binding(keysyms::KEY_1, 5, false),
-            Some(Action::Workspace(0))
+            Some(Dispatch::FocusWorkspace(1))
         );
         assert_eq!(
             binding(keysyms::KEY_0, 5, false),
-            Some(Action::Workspace(9))
+            Some(Dispatch::FocusWorkspace(10))
         );
         assert_eq!(
             binding(keysyms::KEY_Left, 0, false),
-            Some(Action::Workspace(9))
+            Some(Dispatch::FocusWorkspace(10))
         );
         assert_eq!(
             binding(keysyms::KEY_Right, 9, false),
-            Some(Action::Workspace(0))
+            Some(Dispatch::FocusWorkspace(1))
         );
         assert_eq!(
             binding(keysyms::KEY_Return, 0, false),
-            Some(Action::Terminal)
+            Some(Dispatch::Spawn(vec![
+                std::env::var("VILLAIN_TERMINAL").unwrap_or_else(|_| "kitty".into())
+            ]))
         );
-        assert_eq!(binding(keysyms::KEY_q, 0, false), Some(Action::Close));
-        assert_eq!(binding(keysyms::KEY_m, 0, false), Some(Action::Minimize));
+        assert_eq!(
+            binding(keysyms::KEY_q, 0, false),
+            Some(Dispatch::CloseFocused)
+        );
+        assert_eq!(
+            binding(keysyms::KEY_m, 0, false),
+            Some(Dispatch::MinimizeFocused)
+        );
         assert_eq!(
             binding(keysyms::KEY_m, 0, true),
-            Some(Action::RestoreMinimized)
+            Some(Dispatch::RestoreLastMinimized)
         );
         assert_eq!(binding(keysyms::KEY_1, 0, true), None);
         assert_eq!(binding(keysyms::KEY_t, 0, false), None);

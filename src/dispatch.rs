@@ -1,0 +1,132 @@
+//! Central imperative command interface for compositor state changes.
+
+use std::{fmt, io};
+
+use villain_ipc::{DispatchRequest, WindowId};
+
+use crate::state::Villain;
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Dispatch {
+    CloseFocused,
+    MinimizeFocused,
+    RestoreLastMinimized,
+    FocusWorkspace(usize),
+    FocusWindow(WindowId),
+    RestoreWindow(WindowId),
+    Spawn(Vec<String>),
+    Quit,
+}
+
+impl From<DispatchRequest> for Dispatch {
+    fn from(request: DispatchRequest) -> Self {
+        match request {
+            DispatchRequest::CloseFocused => Self::CloseFocused,
+            DispatchRequest::MinimizeFocused => Self::MinimizeFocused,
+            DispatchRequest::RestoreLastMinimized => Self::RestoreLastMinimized,
+            DispatchRequest::FocusWorkspace { workspace } => Self::FocusWorkspace(workspace),
+            DispatchRequest::FocusWindow { window } => Self::FocusWindow(window),
+            DispatchRequest::RestoreWindow { window } => Self::RestoreWindow(window),
+            DispatchRequest::Spawn { argv } => Self::Spawn(argv),
+            DispatchRequest::Quit => Self::Quit,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum DispatchError {
+    NoFocusedWindow,
+    NoMinimizedWindow,
+    InvalidWorkspace(usize),
+    UnknownWindow(WindowId),
+    MinimizedWindow(WindowId),
+    EmptyCommand,
+    Spawn(io::Error),
+}
+
+impl fmt::Display for DispatchError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoFocusedWindow => write!(formatter, "no window is focused"),
+            Self::NoMinimizedWindow => write!(formatter, "no minimized window to restore"),
+            Self::InvalidWorkspace(workspace) => {
+                write!(formatter, "workspace {workspace} does not exist")
+            }
+            Self::UnknownWindow(window) => write!(formatter, "window {} does not exist", window.0),
+            Self::MinimizedWindow(window) => {
+                write!(
+                    formatter,
+                    "window {} is minimized; restore it first",
+                    window.0
+                )
+            }
+            Self::EmptyCommand => write!(formatter, "spawn command is empty"),
+            Self::Spawn(error) => write!(formatter, "could not spawn command: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for DispatchError {}
+
+impl Villain {
+    pub fn dispatch(&mut self, dispatch: Dispatch) -> Result<(), DispatchError> {
+        match dispatch {
+            Dispatch::CloseFocused => self
+                .close_focused_window()
+                .then_some(())
+                .ok_or(DispatchError::NoFocusedWindow),
+            Dispatch::MinimizeFocused => self
+                .minimize_focused_window()
+                .then_some(())
+                .ok_or(DispatchError::NoFocusedWindow),
+            Dispatch::RestoreLastMinimized => self
+                .restore_last_minimized_window()
+                .then_some(())
+                .ok_or(DispatchError::NoMinimizedWindow),
+            Dispatch::FocusWorkspace(workspace) => {
+                if !(1..=self.workspaces.len()).contains(&workspace) {
+                    return Err(DispatchError::InvalidWorkspace(workspace));
+                }
+                self.switch_workspace(workspace - 1);
+                Ok(())
+            }
+            Dispatch::FocusWindow(window) => match self.focus_window(window) {
+                Some(true) => Ok(()),
+                Some(false) => Err(DispatchError::MinimizedWindow(window)),
+                None => Err(DispatchError::UnknownWindow(window)),
+            },
+            Dispatch::RestoreWindow(window) => self
+                .restore_window(window)
+                .then_some(())
+                .ok_or(DispatchError::UnknownWindow(window)),
+            Dispatch::Spawn(argv) => {
+                if argv.is_empty() {
+                    Err(DispatchError::EmptyCommand)
+                } else {
+                    self.spawn(argv).map_err(DispatchError::Spawn)
+                }
+            }
+            Dispatch::Quit => {
+                self.loop_signal.stop();
+                Ok(())
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ipc_dispatch_maps_to_internal_dispatch() {
+        assert_eq!(
+            Dispatch::from(DispatchRequest::FocusWorkspace { workspace: 2 }),
+            Dispatch::FocusWorkspace(2)
+        );
+        assert_eq!(
+            Dispatch::from(DispatchRequest::MinimizeFocused),
+            Dispatch::MinimizeFocused
+        );
+    }
+}

@@ -44,6 +44,7 @@ pub struct Villain {
     pub socket_name: OsString,
     pub start_time: Instant,
     pub loop_signal: LoopSignal,
+    _ipc_server: crate::ipc::IpcServer,
 
     /// The desktop plane: windows are mapped here and later rendered here.
     pub space: Space<Window>,
@@ -71,6 +72,7 @@ pub struct Villain {
     pub cursor: CursorState,
     pub workspaces: [Workspace; 10],
     pub active_workspace: usize,
+    pub next_window_id: u64,
     pub output_size: smithay::utils::Size<i32, smithay::utils::Logical>,
     pub children: Vec<(usize, std::process::Child)>,
     pub suppressed_keys: std::collections::HashSet<smithay::input::keyboard::Keycode>,
@@ -82,6 +84,7 @@ impl Villain {
     pub fn new(event_loop: &mut EventLoop<Self>, display: Display<Self>) -> Self {
         let display_handle = display.handle();
         let socket_name = init_wayland_listener(display, event_loop);
+        let ipc_server = crate::ipc::init(event_loop, &socket_name).expect("initialize IPC server");
         // GTK only exposes a default GdkSeat after it has both wl_seat and
         // wl_data_device_manager. Advertise the selection manager first so
         // clients can construct a complete seat as globals arrive.
@@ -111,6 +114,7 @@ impl Villain {
             socket_name,
             start_time: Instant::now(),
             loop_signal: event_loop.get_signal(),
+            _ipc_server: ipc_server,
             space: Space::default(),
             compositor_state: CompositorState::new::<Self>(&display_handle),
             // Advertise only policy that Villain currently implements. Close
@@ -133,6 +137,7 @@ impl Villain {
             cursor: CursorState::new(),
             workspaces: std::array::from_fn(|_| Workspace::default()),
             active_workspace: 0,
+            next_window_id: 1,
             output_size: (800, 600).into(),
             children: Vec::new(),
             suppressed_keys: Default::default(),

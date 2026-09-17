@@ -5,7 +5,9 @@
 
 mod backend_selection;
 mod cursor;
+mod dispatch;
 mod handlers;
+mod ipc;
 mod keybinds;
 mod render;
 mod state;
