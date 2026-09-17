@@ -2,7 +2,7 @@
 name = "villain"
 version = "0.1.0"
 edition = "2024"
-description = "A small compositor built while learning Smithay"
+description = "A tiling-first Wayland compositor and window manager for the Abhi Desktop Environment"
 license = "MIT"
 
 [dependencies]
