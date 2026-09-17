@@ -21,6 +21,8 @@ use smithay::{
     },
 };
 
+use crate::workspaces::Workspace;
+
 /// All mutable compositor state lives here.
 ///
 /// Keeping this in one ordinary struct is intentional. `calloop` passes a
@@ -51,7 +53,7 @@ pub struct Villain {
     pub keyboard: KeyboardHandle<Self>,
     pub pointer: smithay::input::pointer::PointerHandle<Self>,
     pub pointer_location: smithay::utils::Point<f64, smithay::utils::Logical>,
-    pub workspaces: [Option<Window>; 10],
+    pub workspaces: [Workspace; 10],
     pub active_workspace: usize,
     pub output_size: smithay::utils::Size<i32, smithay::utils::Logical>,
     pub children: Vec<(usize, std::process::Child)>,
@@ -87,7 +89,7 @@ impl Villain {
             keyboard,
             pointer,
             pointer_location: (0.0, 0.0).into(),
-            workspaces: std::array::from_fn(|_| None),
+            workspaces: std::array::from_fn(|_| Workspace::default()),
             active_workspace: 0,
             output_size: (800, 600).into(),
             children: Vec::new(),

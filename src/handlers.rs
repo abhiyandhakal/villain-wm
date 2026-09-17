@@ -37,13 +37,7 @@ impl CompositorHandler for Villain {
 
         // The first commit is the handshake: we tell the client which state
         // the compositor accepts, then the client can commit its first buffer.
-        if let Some(window) = self
-            .workspaces
-            .iter()
-            .flatten()
-            .find(|window| window.toplevel().unwrap().wl_surface() == surface)
-            .cloned()
-        {
+        if let Some(window) = self.window_for_surface(surface) {
             // Update the window's bounding box from the newly committed
             // surface. Space uses this geometry to decide what gets rendered
             // on each output.
@@ -90,16 +84,7 @@ impl XdgShellHandler for Villain {
     }
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
-        for slot in &mut self.workspaces {
-            if slot
-                .as_ref()
-                .is_some_and(|window| window.toplevel() == Some(&surface))
-                && let Some(window) = slot.take()
-            {
-                self.space.unmap_elem(&window);
-            }
-        }
-        self.focus_active();
+        self.remove_window(&surface);
     }
 
     fn new_popup(&mut self, _surface: PopupSurface, _positioner: PositionerState) {}

@@ -213,7 +213,7 @@ pub fn init(
                 }
                 state.suppressed_keys.clear();
                 state.host_focused = false;
-                state.focus_active();
+                state.refresh_pointer(0);
                 if let Some(tty) = state.tty.as_mut() {
                     tty.active = false;
                     // A VT switch can prevent delivery of the last flip event.
@@ -240,7 +240,7 @@ pub fn init(
                 tty.active = true;
                 tty.damage = OutputDamageTracker::from_output(&tty.output);
                 state.host_focused = true;
-                state.focus_active();
+                state.refresh_pointer(0);
             }
         })?;
     event_loop

@@ -8,14 +8,21 @@ use smithay::{
 
 #[derive(Debug, PartialEq)]
 enum Action {
+    Close,
+    Minimize,
+    RestoreMinimized,
     Terminal,
     Workspace(usize),
     Quit,
     Vt(i32),
 }
 
-fn binding(sym: u32, active: usize) -> Option<Action> {
+fn binding(sym: u32, active: usize, shift: bool) -> Option<Action> {
     match sym {
+        keysyms::KEY_q if !shift => Some(Action::Close),
+        keysyms::KEY_m if !shift => Some(Action::Minimize),
+        keysyms::KEY_m if shift => Some(Action::RestoreMinimized),
+        _ if shift => None,
         keysyms::KEY_Return | keysyms::KEY_KP_Enter => Some(Action::Terminal),
         keysyms::KEY_1..=keysyms::KEY_9 => Some(Action::Workspace((sym - keysyms::KEY_1) as usize)),
         keysyms::KEY_0 => Some(Action::Workspace(9)),
@@ -76,11 +83,10 @@ pub fn handle_keyboard_event<B: InputBackend>(
                 && mods.alt
                 && !mods.ctrl
                 && !mods.logo
-                && !mods.shift
                 && let Some(action) = key
                     .raw_syms()
                     .iter()
-                    .find_map(|sym| binding(sym.raw(), state.active_workspace))
+                    .find_map(|sym| binding(sym.raw(), state.active_workspace, mods.shift))
             {
                 state.suppressed_keys.insert(code);
                 return FilterResult::Intercept(Some(action));
@@ -89,6 +95,9 @@ pub fn handle_keyboard_event<B: InputBackend>(
         },
     );
     match action.flatten() {
+        Some(Action::Close) => state.close_focused_window(),
+        Some(Action::Minimize) => state.minimize_focused_window(),
+        Some(Action::RestoreMinimized) => state.restore_last_minimized_window(),
         Some(Action::Terminal) => state.launch_terminal(),
         Some(Action::Workspace(index)) => state.switch_workspace(index),
         Some(Action::Quit) => state.loop_signal.stop(),
@@ -109,11 +118,33 @@ mod tests {
     use super::*;
     #[test]
     fn workspace_numbers_and_wraparound() {
-        assert_eq!(binding(keysyms::KEY_1, 5), Some(Action::Workspace(0)));
-        assert_eq!(binding(keysyms::KEY_0, 5), Some(Action::Workspace(9)));
-        assert_eq!(binding(keysyms::KEY_Left, 0), Some(Action::Workspace(9)));
-        assert_eq!(binding(keysyms::KEY_Right, 9), Some(Action::Workspace(0)));
-        assert_eq!(binding(keysyms::KEY_Return, 0), Some(Action::Terminal));
-        assert_eq!(binding(keysyms::KEY_t, 0), None);
+        assert_eq!(
+            binding(keysyms::KEY_1, 5, false),
+            Some(Action::Workspace(0))
+        );
+        assert_eq!(
+            binding(keysyms::KEY_0, 5, false),
+            Some(Action::Workspace(9))
+        );
+        assert_eq!(
+            binding(keysyms::KEY_Left, 0, false),
+            Some(Action::Workspace(9))
+        );
+        assert_eq!(
+            binding(keysyms::KEY_Right, 9, false),
+            Some(Action::Workspace(0))
+        );
+        assert_eq!(
+            binding(keysyms::KEY_Return, 0, false),
+            Some(Action::Terminal)
+        );
+        assert_eq!(binding(keysyms::KEY_q, 0, false), Some(Action::Close));
+        assert_eq!(binding(keysyms::KEY_m, 0, false), Some(Action::Minimize));
+        assert_eq!(
+            binding(keysyms::KEY_m, 0, true),
+            Some(Action::RestoreMinimized)
+        );
+        assert_eq!(binding(keysyms::KEY_1, 0, true), None);
+        assert_eq!(binding(keysyms::KEY_t, 0, false), None);
     }
 }

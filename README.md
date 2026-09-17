@@ -237,7 +237,25 @@ For example:
 └───────────────┴───────┘
 ```
 
-The final layout model is not yet decided.
+The current implementation uses a 50/50 master-and-stack layout. Windows keep
+their creation order: the first visible window is the master and later windows
+append to the stack. A minimized window keeps its place in that order but is
+left out of the visible layout until restored.
+
+### Current controls
+
+The temporary mod key is `Alt` while Villain is being tested.
+
+| Binding | Action |
+| --- | --- |
+| `Alt+Enter` | Open a terminal |
+| `Alt+Q` | Close the focused window |
+| `Alt+M` | Minimize the focused window |
+| `Alt+Shift+M` | Restore the last minimized window |
+| `Alt+1`–`Alt+9`, `Alt+0` | Select workspace 1–10 |
+| `Alt+Left`, `Alt+Right` | Select the previous or next workspace |
+
+Keyboard focus follows the pointer across visible windows.
 
 ---
 

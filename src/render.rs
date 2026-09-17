@@ -61,9 +61,7 @@ pub fn init_winit(
         .insert_source(winit_source, move |event, _, state| match event {
             WinitEvent::Resized { size, .. } => {
                 state.output_size = size.to_logical(1);
-                for window in state.workspaces.iter().flatten() {
-                    state.configure_window(window);
-                }
+                state.relayout_active_workspace();
                 output.change_current_state(
                     Some(Mode {
                         size,
@@ -142,7 +140,7 @@ pub fn init_winit(
                     }
                     state.suppressed_keys.clear();
                 }
-                state.focus_active();
+                state.refresh_pointer(0);
             }
             WinitEvent::Redraw => {
                 let size = backend.window_size();
