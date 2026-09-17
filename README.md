@@ -257,6 +257,11 @@ The temporary mod key is `Alt` while Villain is being tested.
 
 Keyboard focus follows the pointer across visible windows.
 
+Villain renders its own cursor in both nested and direct modes. It follows
+client-provided cursor surfaces and the standard cursor-shape protocol, loading
+named shapes from `XCURSOR_THEME` at `XCURSOR_SIZE` when those variables are
+set. The host compositor's cursor is hidden while it is over the nested output.
+
 ---
 
 ## Architecture

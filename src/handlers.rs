@@ -136,6 +136,7 @@ impl XdgShellHandler for Villain {
 // above. It is intentionally at the bottom: the implementations are easier to
 // find before the generated dispatch glue.
 smithay::delegate_compositor!(Villain);
+smithay::delegate_cursor_shape!(Villain);
 smithay::delegate_data_device!(Villain);
 smithay::delegate_output!(Villain);
 smithay::delegate_seat!(Villain);

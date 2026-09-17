@@ -15,6 +15,7 @@ use smithay::{
     },
     wayland::{
         compositor::{CompositorClientState, CompositorState},
+        cursor_shape::CursorShapeManagerState,
         output::OutputManagerState,
         selection::data_device::DataDeviceState,
         shell::xdg::XdgShellState,
@@ -23,6 +24,7 @@ use smithay::{
     },
 };
 
+use crate::cursor::CursorState;
 use crate::workspaces::Workspace;
 
 /// All mutable compositor state lives here.
@@ -48,6 +50,8 @@ pub struct Villain {
     pub shm_state: ShmState,
     pub data_device_state: DataDeviceState,
     #[allow(dead_code)]
+    pub cursor_shape_state: CursorShapeManagerState,
+    #[allow(dead_code)]
     pub output_manager_state: OutputManagerState,
 
     // XDG shell dispatch needs to know what a compositor considers a seat,
@@ -56,6 +60,7 @@ pub struct Villain {
     pub keyboard: KeyboardHandle<Self>,
     pub pointer: smithay::input::pointer::PointerHandle<Self>,
     pub pointer_location: smithay::utils::Point<f64, smithay::utils::Logical>,
+    pub cursor: CursorState,
     pub workspaces: [Workspace; 10],
     pub active_workspace: usize,
     pub output_size: smithay::utils::Size<i32, smithay::utils::Logical>,
@@ -97,11 +102,13 @@ impl Villain {
             ),
             shm_state: ShmState::new::<Self>(&display_handle, vec![]),
             data_device_state,
+            cursor_shape_state: CursorShapeManagerState::new::<Self>(&display_handle),
             output_manager_state: OutputManagerState::new_with_xdg_output::<Self>(&display_handle),
             seat_state,
             keyboard,
             pointer,
             pointer_location: (0.0, 0.0).into(),
+            cursor: CursorState::new(),
             workspaces: std::array::from_fn(|_| Workspace::default()),
             active_workspace: 0,
             output_size: (800, 600).into(),
@@ -121,7 +128,17 @@ impl SeatHandler for Villain {
     fn seat_state(&mut self) -> &mut SeatState<Self> {
         &mut self.seat_state
     }
+
+    fn cursor_image(
+        &mut self,
+        _seat: &smithay::input::Seat<Self>,
+        image: smithay::input::pointer::CursorImageStatus,
+    ) {
+        self.cursor.set_image(image, self.start_time.elapsed());
+    }
 }
+
+impl smithay::wayland::tablet_manager::TabletSeatHandler for Villain {}
 
 /// Data attached to each connected client.
 ///

@@ -14,15 +14,7 @@ use smithay::{
             PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
         },
         libinput::{LibinputInputBackend, LibinputSessionInterface},
-        renderer::{
-            Bind,
-            damage::OutputDamageTracker,
-            element::{
-                Kind,
-                solid::{SolidColorBuffer, SolidColorRenderElement},
-            },
-            gles::GlesRenderer,
-        },
+        renderer::{Bind, damage::OutputDamageTracker, gles::GlesRenderer},
         session::{Event as SessionEvent, Session, libseat::LibSeatSession},
         udev::{all_gpus, primary_gpu},
     },
@@ -51,7 +43,6 @@ pub struct Tty {
     drm: DrmDevice,
     output: Output,
     damage: OutputDamageTracker,
-    cursor: SolidColorBuffer,
     active: bool,
     pending: bool,
     pub session: LibSeatSession,
@@ -161,7 +152,6 @@ pub fn init(
         drm,
         output,
         damage,
-        cursor: SolidColorBuffer::new((10, 16), [1.0, 1.0, 1.0, 1.0]),
         active: true,
         pending: false,
         session: session.clone(),
@@ -265,17 +255,12 @@ pub fn init(
 impl Tty {
     fn render(&mut self, state: &mut Villain) -> Result<(), Box<dyn Error>> {
         let (mut buffer, _age) = self.surface.next_buffer()?;
-        let cursor = SolidColorRenderElement::from_buffer(
-            &self.cursor,
-            (
-                state.pointer_location.x as i32,
-                state.pointer_location.y as i32,
-            ),
-            1.0,
-            1.0,
-            Kind::Cursor,
-        );
         let mut framebuffer = self.renderer.bind(&mut buffer)?;
+        let now = state.start_time.elapsed();
+        let cursor_elements =
+            state
+                .cursor
+                .render_elements(&mut self.renderer, state.pointer_location, now);
         // Repaint the whole buffer for now: no buffer-age optimization yet.
         let result = render_output(
             &self.output,
@@ -284,7 +269,7 @@ impl Tty {
             1.0,
             0,
             [&state.space],
-            &[cursor],
+            &cursor_elements,
             &mut self.damage,
             [0.08, 0.05, 0.12, 1.0],
         )?;
@@ -300,6 +285,7 @@ impl Tty {
                 |_, _| Some(self.output.clone()),
             );
         }
+        state.cursor.send_frame(&self.output, now);
         Ok(())
     }
 }

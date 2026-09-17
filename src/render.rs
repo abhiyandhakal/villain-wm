@@ -8,10 +8,7 @@ use smithay::{
             AbsolutePositionEvent, Axis, AxisSource, Event, InputEvent, KeyState, PointerAxisEvent,
             PointerButtonEvent,
         },
-        renderer::{
-            damage::OutputDamageTracker, element::surface::WaylandSurfaceRenderElement,
-            gles::GlesRenderer,
-        },
+        renderer::damage::OutputDamageTracker,
         winit::{self, WinitEvent},
     },
     desktop::space::render_output,
@@ -29,7 +26,9 @@ pub fn init_winit(
     state: &mut Villain,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (mut backend, winit_source) = winit::init()?;
-    backend.window().set_cursor_visible(true);
+    // Villain renders the cursor into its nested output. Winit only supplies
+    // host pointer events and hides the host cursor while it is over this window.
+    backend.window().set_cursor_visible(false);
     state.output_size = backend.window_size().to_logical(1);
     let mode = Mode {
         size: backend.window_size(),
@@ -146,15 +145,20 @@ pub fn init_winit(
                 let size = backend.window_size();
                 let damage = Rectangle::from_size(size);
                 let (renderer, mut framebuffer) = backend.bind().expect("bind Winit framebuffer");
+                let now = state.start_time.elapsed();
+                let cursor_elements =
+                    state
+                        .cursor
+                        .render_elements(renderer, state.pointer_location, now);
 
-                render_output::<_, WaylandSurfaceRenderElement<GlesRenderer>, _, _>(
+                render_output::<_, crate::cursor::CursorRenderElement, _, _>(
                     &output,
                     renderer,
                     &mut framebuffer,
                     1.0,
                     0,
                     [&state.space],
-                    &[],
+                    &cursor_elements,
                     &mut damage_tracker,
                     [0.08, 0.05, 0.12, 1.0],
                 )
@@ -173,6 +177,7 @@ pub fn init_winit(
                         |_, _| Some(output.clone()),
                     );
                 });
+                state.cursor.send_frame(&output, now);
                 state.space.refresh();
                 let _ = state.display_handle.flush_clients();
                 backend.window().request_redraw();

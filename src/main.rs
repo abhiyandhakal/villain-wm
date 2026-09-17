@@ -4,6 +4,7 @@
 //! Both backends use the same Wayland protocol and workspace state.
 
 mod backend_selection;
+mod cursor;
 mod handlers;
 mod keybinds;
 mod render;
