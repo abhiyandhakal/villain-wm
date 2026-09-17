@@ -1,106 +1,400 @@
 # Villain
 
-Villain is a tiny Wayland compositor written in Rust with [Smithay](https://smithay.github.io/smithay/).
+**Villain** is an experimental tiling-first Wayland compositor and window manager for the **Abhi Desktop Environment**.
 
-The name is temporary and the scope is intentional: this is a learning
-compositor, not a desktop environment. The first milestone runs nested inside
-the current desktop using Smithay's Winit backend. It creates a Wayland socket,
-accepts clients, maps their XDG toplevel surfaces, and renders shared-memory
-buffers into one output window.
+> *Wayland compositor* was once transcribed as *villain compositor*. The name stuck.
 
-## Run it
+Villain is an attempt to build a compositor around a simple idea:
 
-You need a Rust toolchain and the native packages required by Smithay's Winit
-backend (`libwayland` and `libxkbcommon` on most Linux distributions).
+**A tiling desktop should feel like a complete desktop environment, not a collection of separately configured components.**
 
-```sh
-cargo run
+The goal is not to reproduce Hyprland, Sway, i3, GNOME, KDE, or any other existing environment. Villain will borrow ideas where they work, follow established Wayland protocols where possible, and develop its own window-management model where existing behavior does not fit the desktop Abhi is trying to provide.
+
+---
+
+## Status
+
+Villain is **very early experimental software**.
+
+Expect missing functionality, broken behavior, changing APIs, and major architectural changes.
+
+The first target is not feature completeness.
+
+The first target is:
+
+> **Become usable enough for its developer to run it.**
+
+---
+
+## Abhi Desktop Environment
+
+Villain is one part of the larger **Abhi Desktop Environment**.
+
+```text
+Abhi Desktop Environment
+│
+├── Villain
+│   └── Wayland compositor + window manager
+│
+└── abhishell
+    ├── status bar
+    ├── launcher
+    ├── overview
+    ├── notifications
+    ├── quick settings
+    └── other desktop UI
 ```
 
-Villain prints the socket name it selected. In another shell, run a Wayland
-client against that socket. For example, if it prints `wayland-1`:
+Villain and `abhishell` are separate components, but together form one desktop experience.
 
-```sh
-WAYLAND_DISPLAY=wayland-1 weston-terminal
+The separation is intentional:
+
+* **Villain** owns windows, workspaces, input, layout, focus, activation, outputs, and composition.
+* **abhishell** owns desktop-facing UI.
+* The user should normally think about **Abhi**, not about which internal component implements a particular feature.
+
+---
+
+## Design Philosophy
+
+### Tiling first
+
+Tiling is not an optional mode layered on top of a traditional floating desktop.
+
+Villain assumes from the beginning that windows normally participate in layouts.
+
+Floating windows will exist where they make sense, but the desktop itself is designed around tiling.
+
+---
+
+### Usable by default
+
+The user should not have to assemble a desktop from:
+
+* a compositor,
+* a bar,
+* a launcher,
+* a notification daemon,
+* a lock screen,
+* scripts,
+* several unrelated configuration files,
+* and enough glue to keep them cooperating.
+
+Abhi should provide a coherent working environment out of the box.
+
+---
+
+### Opinionated, but customizable
+
+Villain should expose **meaningful choices**, not every internal implementation detail.
+
+Customization should allow users to change the desktop without making ordinary configurations unpredictable or internally inconsistent.
+
+The intention is roughly:
+
+```text
+strong defaults
+      +
+useful customization
+      +
+advanced escape hatches
+      -
+configuration for configuration's sake
 ```
 
-The client command must be started while Villain is running. Close the nested
-window to stop the compositor.
+There should still be a recognizable answer to:
 
-## How to read this version
+> “How does Villain behave?”
 
-Start at [`src/main.rs`](src/main.rs), then follow this path:
+even on a customized installation.
 
-1. `main` creates a `calloop` event loop, a Wayland `Display`, and `Villain`.
-2. [`state.rs`](src/state.rs) registers the Wayland socket and adds the display
-   as an event source. It also stores Smithay's protocol state.
-3. [`handlers.rs`](src/handlers.rs) implements the protocol callbacks. A new
-   XDG toplevel becomes a `Window` in the desktop `Space`.
-4. [`render.rs`](src/render.rs) creates one nested output and renders the
-   `Space` whenever the Winit window asks for a redraw.
+---
 
-The important boundary is that Wayland clients do not draw directly to our
-window. They submit buffers to the compositor; the compositor decides where
-and when those buffers become visible.
+### Window semantics matter
 
-## Workspaces and input
+Window management is more than deciding where rectangles go.
 
-Focus the nested Villain window and press `Alt+Enter`. Villain's keyboard
-filter recognizes the combination and launches the executable named by
-`VILLAIN_TERMINAL`, or `kitty` by default:
+Villain intends to treat concepts such as these as first-class behavior:
 
-```sh
-VILLAIN_TERMINAL=kitty cargo run
+* tiled windows
+* floating windows
+* fullscreen windows
+* minimized or shelved windows
+* workspaces
+* activation
+* focus
+* attention requests
+* transient windows
+* popups
+
+These states should have clear semantics rather than being approximated through unrelated mechanisms.
+
+---
+
+## Planned Window Behaviour
+
+### Minimization / shelving
+
+Tiling should not mean that every open application must permanently consume layout space.
+
+A minimized window remains associated with its workspace but temporarily stops participating in its visible layout.
+
+```text
+Before:
+
+┌──────────────┬──────────────┐
+│              │              │
+│   Terminal   │   Browser    │
+│              │              │
+├──────────────┴──────────────┤
+│           Editor            │
+└─────────────────────────────┘
+
+
+Browser minimized:
+
+┌─────────────────────────────┐
+│          Terminal           │
+├─────────────────────────────┤
+│           Editor            │
+└─────────────────────────────┘
+
+Hidden:
+[ Browser ]
 ```
 
-The important detail is that Villain sets `WAYLAND_DISPLAY` for the child
-process to its own socket. The terminal therefore connects to Villain, and
-its XDG toplevel becomes a window in Villain's `Space`. The shortcut is
-intercepted, so it is not forwarded to a client.
+Moving a window to another workspace and minimizing it are different operations.
 
-There are ten workspaces, each holding one toplevel window. `Alt+1` through
-`Alt+9` select workspaces 1–9; `Alt+0` selects 10. `Alt+Left` and `Alt+Right`
-cycle with wraparound. An occupied workspace ignores `Alt+Enter`; repeated
-launches are also blocked while the child is starting. Extra toplevels on an
-occupied workspace receive a close request. Closing the app frees its slot.
+Workspaces represent context.
 
-Each app is configured fullscreen at the nested output size, including after
-resizing. Ordinary keyboard input, pointer motion, clicks, and scrolling go
-to the active app. The native Winit cursor supplies a visible arrow; custom
-client cursor images are not implemented. Host desktop shortcuts can intercept
-these combinations before Villain receives them.
+Minimization represents visibility.
 
-[`workspaces.rs`](src/workspaces.rs) stores hidden windows while only the active
-window is mapped into `Space`. Keyboard focus names its Wayland surface; pointer
-focus additionally tracks the surface under the cursor. Smithay handles delivery
-and pointer grabs during drags. [`keybinds.rs`](src/keybinds.rs) consumes both the
-press and release of shortcut keys, even if Alt is released first.
+---
 
-Direct child process IDs associate launched terminals with the workspace where
-they started. Use a standalone terminal executable for `VILLAIN_TERMINAL`, not
-a wrapper or a single-instance launcher; unrelated external clients use the
-current workspace. Child exits are reaped without blocking the event loop.
-Wayland replies are flushed every loop iteration, independently of rendering.
+### Activation
 
-To test: launch a terminal, type a command, select text with the mouse, then
-switch to workspace 2 and launch another terminal. Switching back should restore
-the first terminal. Test workspace 10, arrow-key wraparound, output resizing,
-and closing a terminal with `exit` followed by opening it again.
-Key diagnostics are available with `RUST_LOG=villain=debug cargo run`.
+Villain should distinguish between:
 
-## Deliberate limitations
+* explicit user-driven activation,
+* application-generated attention requests,
+* and unwanted background focus stealing.
 
-This version has no direct DRM backend, popups, clipboard, decorations,
-custom cursor themes, or support for multiple windows within one workspace.
-Those are separate learning steps. Keeping them out makes the event flow
-visible and keeps the first compositor safe to run inside an existing session.
+For example:
 
-## Checks
-
-```sh
-cargo fmt --check
-cargo check
+```text
+User clicks "Open in application"
+        ↓
+target exists on another workspace
+        ↓
+switch workspace
+        ↓
+focus target
 ```
 
-The code follows Smithay 0.7.0's current public API. Smithay's own `smallvil`
-example is a useful next comparison once this minimal path is understood.
+But:
+
+```text
+background application requests attention
+        ↓
+mark as requiring attention
+        ↓
+do not unexpectedly steal focus
+```
+
+Activation policy should be deliberate rather than reduced to a single global `true` / `false` switch.
+
+---
+
+### Predictable layouts
+
+Opening applications should produce sensible layouts without requiring the user to manually construct a container tree.
+
+For example:
+
+```text
+1 window
+
+┌───────────────────────┐
+│           A           │
+└───────────────────────┘
+```
+
+```text
+2 windows
+
+┌───────────┬───────────┐
+│     A     │     B     │
+└───────────┴───────────┘
+```
+
+```text
+3 windows
+
+┌───────────────┬───────┐
+│               │   B   │
+│       A       ├───────┤
+│               │   C   │
+└───────────────┴───────┘
+```
+
+The final layout model is not yet decided.
+
+---
+
+## Architecture
+
+Villain conceptually separates compositor mechanism from window-management policy.
+
+```text
+Wayland clients
+      │
+      ▼
+┌─────────────────────────────┐
+│           Villain           │
+│                             │
+│  Wayland protocol handling  │
+│  input                      │
+│  rendering                  │
+│  outputs                    │
+│                             │
+│  ─────────────────────────  │
+│                             │
+│  window model               │
+│  layouts                    │
+│  workspaces                 │
+│  focus                      │
+│  activation                 │
+│  minimization               │
+└──────────────┬──────────────┘
+               │
+               ▼
+            displays
+```
+
+A normal application window will generally enter Villain through an `xdg_toplevel`.
+
+Villain then maintains its own higher-level representation of that window:
+
+```text
+xdg_toplevel
+      ↓
+Villain window
+      ↓
+workspace
+      ↓
+layout policy
+      ↓
+geometry
+      ↓
+scene / renderer
+```
+
+The compositor mechanism should not dictate the desktop's window-management policy.
+
+---
+
+## Villain and abhishell
+
+`abhishell` will run separately from Villain rather than being embedded directly into the compositor process.
+
+Conceptually:
+
+```text
+┌─────────────────────────┐
+│       abhishell         │
+│                         │
+│ bar                     │
+│ overview                │
+│ launcher                │
+│ notifications           │
+│ quick settings          │
+└────────────┬────────────┘
+             │
+       Wayland + IPC
+             │
+┌────────────▼────────────┐
+│         Villain         │
+│                         │
+│ compositor              │
+│ window manager          │
+└─────────────────────────┘
+```
+
+Shell surfaces such as panels, launchers, and overlays are not normal application windows and should not participate in ordinary tiling layouts.
+
+Villain and `abhishell` may eventually use a private protocol or IPC interface for functionality that cannot appropriately be exposed to arbitrary Wayland clients.
+
+---
+
+## Existing Ecosystem
+
+Villain does not intend to reimplement every component of a Linux desktop.
+
+It should reuse standard Linux and Wayland infrastructure wherever practical.
+
+Likely integration areas include:
+
+* Wayland protocols
+* PipeWire
+* XDG Desktop Portals
+* libinput
+* DRM/KMS
+* systemd
+* polkit
+* NetworkManager
+* existing application ecosystems
+
+Hyprland and other compositors are useful references for protocol support, hardware quirks, NVIDIA compatibility, ecosystem integration, and accumulated lessons from real-world compositor development.
+
+Villain may intentionally support compatible protocols where doing so makes existing tools reusable.
+
+However, Hyprland-specific architecture should not become Villain's internal architecture.
+
+---
+
+## Technology
+
+Villain is written in **Rust** and built on **Smithay**.
+
+Smithay provides the low-level building blocks for the Wayland compositor, including protocol handling, backend integration, input, rendering, outputs, and compositor infrastructure.
+
+Villain builds its own desktop and window-management policy on top of those primitives.
+
+Conceptually:
+
+```text
+Linux / Wayland / DRM / input
+              │
+           Smithay
+              │
+           Villain
+      ┌───────┴────────┐
+      │                │
+ window management   compositor policy
+      │                │
+      └───────┬────────┘
+              │
+       Abhi Desktop
+```
+
+Using Smithay avoids reimplementing generic compositor infrastructure while keeping Villain's window model, layouts, workspace semantics, activation policy, and other desktop behavior under its own control.
+
+The project may still change substantially while the compositor is developed, and no internal or public API should currently be considered stable.
+
+---
+
+## Why?
+
+Because tiling window managers are good at managing windows.
+
+Traditional desktop environments are good at being complete desktops.
+
+There is still interesting design space in treating **tiling itself as the foundation of a complete desktop environment** rather than as an optional mode or a system the user must assemble themselves.
+
+And because building a Wayland compositor sounds fun.
+
+---
+
+## License
+
+MIT
