@@ -20,6 +20,12 @@ struct WorkspaceWindow {
     minimized: bool,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum WindowAction {
+    Close,
+    Minimize,
+}
+
 fn master_stack_layout(
     output: Size<i32, smithay::utils::Logical>,
     window_count: usize,
@@ -160,27 +166,47 @@ impl Villain {
     }
 
     pub fn close_focused_window(&mut self) {
-        if let Some(window) = self.focused_window() {
-            window.toplevel().unwrap().send_close();
+        if let Some(surface) = self.focused_toplevel() {
+            self.apply_window_action(&surface, WindowAction::Close);
         }
     }
 
     pub fn minimize_focused_window(&mut self) {
-        let Some(focused) = self.focused_window() else {
-            return;
-        };
-        let workspace = &mut self.workspaces[self.active_workspace];
-        if let Some(entry) = workspace
-            .windows
-            .iter_mut()
-            .find(|entry| entry.window == focused && !entry.minimized)
-        {
-            entry.minimized = true;
-            workspace
-                .minimized_history
-                .retain(|window| window != &focused);
-            workspace.minimized_history.push(focused);
-            self.relayout_active_workspace();
+        if let Some(surface) = self.focused_toplevel() {
+            self.apply_window_action(&surface, WindowAction::Minimize);
+        }
+    }
+
+    pub fn apply_window_action(&mut self, surface: &ToplevelSurface, action: WindowAction) {
+        match action {
+            WindowAction::Close => {
+                if self.window_for_toplevel(surface).is_some() {
+                    surface.send_close();
+                }
+            }
+            WindowAction::Minimize => {
+                let mut changed_active_workspace = false;
+                for (index, workspace) in self.workspaces.iter_mut().enumerate() {
+                    let Some(entry) = workspace
+                        .windows
+                        .iter_mut()
+                        .find(|entry| entry.window.toplevel() == Some(surface) && !entry.minimized)
+                    else {
+                        continue;
+                    };
+                    entry.minimized = true;
+                    let window = entry.window.clone();
+                    workspace
+                        .minimized_history
+                        .retain(|candidate| candidate != &window);
+                    workspace.minimized_history.push(window);
+                    changed_active_workspace = index == self.active_workspace;
+                    break;
+                }
+                if changed_active_workspace {
+                    self.relayout_active_workspace();
+                }
+            }
         }
     }
 
@@ -199,12 +225,20 @@ impl Villain {
         }
     }
 
-    fn focused_window(&self) -> Option<Window> {
+    fn focused_toplevel(&self) -> Option<ToplevelSurface> {
         let focused = self.keyboard.current_focus()?;
         self.workspaces[self.active_workspace]
             .windows
             .iter()
             .find(|entry| entry.window.toplevel().unwrap().wl_surface() == &focused)
+            .and_then(|entry| entry.window.toplevel().cloned())
+    }
+
+    fn window_for_toplevel(&self, surface: &ToplevelSurface) -> Option<Window> {
+        self.workspaces
+            .iter()
+            .flat_map(|workspace| &workspace.windows)
+            .find(|entry| entry.window.toplevel() == Some(surface))
             .map(|entry| entry.window.clone())
     }
 

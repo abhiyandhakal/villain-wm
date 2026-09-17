@@ -7,6 +7,7 @@ use smithay::{
     input::{SeatHandler, SeatState, keyboard::KeyboardHandle},
     reexports::{
         calloop::{EventLoop, Interest, LoopSignal, Mode, PostAction, generic::Generic},
+        wayland_protocols::xdg::shell::server::xdg_toplevel,
         wayland_server::{
             Display, DisplayHandle,
             backend::{ClientData, ClientId, DisconnectReason},
@@ -88,7 +89,12 @@ impl Villain {
             loop_signal: event_loop.get_signal(),
             space: Space::default(),
             compositor_state: CompositorState::new::<Self>(&display_handle),
-            xdg_shell_state: XdgShellState::new::<Self>(&display_handle),
+            // Advertise only policy that Villain currently implements. Close
+            // is a compositor-to-client event, not a WM capability.
+            xdg_shell_state: XdgShellState::new_with_capabilities::<Self>(
+                &display_handle,
+                [xdg_toplevel::WmCapabilities::Minimize],
+            ),
             shm_state: ShmState::new::<Self>(&display_handle, vec![]),
             data_device_state,
             output_manager_state: OutputManagerState::new_with_xdg_output::<Self>(&display_handle),

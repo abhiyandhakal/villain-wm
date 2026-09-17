@@ -31,6 +31,7 @@ use smithay::{
 use std::os::fd::OwnedFd;
 
 use crate::state::{ClientState, Villain};
+use crate::workspaces::WindowAction;
 
 impl CompositorHandler for Villain {
     fn compositor_state(&mut self) -> &mut CompositorState {
@@ -112,6 +113,10 @@ impl XdgShellHandler for Villain {
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
         self.remove_window(&surface);
+    }
+
+    fn minimize_request(&mut self, surface: ToplevelSurface) {
+        self.apply_window_action(&surface, WindowAction::Minimize);
     }
 
     fn new_popup(&mut self, _surface: PopupSurface, _positioner: PositionerState) {}
