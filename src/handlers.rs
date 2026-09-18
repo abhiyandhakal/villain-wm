@@ -219,6 +219,7 @@ smithay::delegate_data_control!(Villain);
 smithay::delegate_ext_data_control!(Villain);
 smithay::delegate_output!(Villain);
 smithay::delegate_primary_selection!(Villain);
+smithay::delegate_presentation!(Villain);
 smithay::delegate_seat!(Villain);
 smithay::delegate_shm!(Villain);
 smithay::delegate_xdg_shell!(Villain);

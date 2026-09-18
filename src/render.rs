@@ -11,11 +11,15 @@ use smithay::{
         renderer::{damage::OutputDamageTracker, gles::GlesRenderer},
         winit::{self, WinitEvent},
     },
-    desktop::space::render_output,
+    desktop::{space::render_output, utils::OutputPresentationFeedback},
     input::pointer::{AxisFrame, ButtonEvent},
     output::{Mode, Output, PhysicalProperties, Subpixel},
-    reexports::calloop::EventLoop,
-    utils::Transform,
+    reexports::{
+        calloop::EventLoop,
+        wayland_protocols::wp::presentation_time::server::wp_presentation_feedback,
+    },
+    utils::{Clock, Monotonic, Transform},
+    wayland::presentation::Refresh,
 };
 
 use crate::state::Villain;
@@ -25,6 +29,7 @@ pub struct Winit {
     output: Output,
     damage: OutputDamageTracker,
     redraw_requested: bool,
+    presentation_sequence: u64,
 }
 
 impl Winit {
@@ -76,6 +81,7 @@ pub fn init_winit(
         output,
         damage,
         redraw_requested: false,
+        presentation_sequence: 0,
     });
     event_loop
         .handle()
@@ -205,6 +211,17 @@ fn render_frame(state: &mut Villain) {
             [0.08, 0.05, 0.12, 1.0],
         )?;
         let damage = result.damage.cloned();
+        let mut feedback = damage.as_ref().map(|_| {
+            let mut feedback = OutputPresentationFeedback::new(&winit.output);
+            for window in state.space.elements() {
+                window.take_presentation_feedback(
+                    &mut feedback,
+                    |_, _| Some(winit.output.clone()),
+                    |_, _| wp_presentation_feedback::Kind::empty(),
+                );
+            }
+            feedback
+        });
         drop(framebuffer);
         let submitted = if let Some(damage) = damage {
             winit.backend.submit(Some(&damage))?;
@@ -214,6 +231,15 @@ fn render_frame(state: &mut Villain) {
         };
 
         if submitted {
+            winit.presentation_sequence = winit.presentation_sequence.wrapping_add(1);
+            if let Some(feedback) = feedback.as_mut() {
+                feedback.presented(
+                    Clock::<Monotonic>::new().now(),
+                    Refresh::fixed(Duration::from_secs_f64(1.0 / 60.0)),
+                    winit.presentation_sequence,
+                    wp_presentation_feedback::Kind::Vsync,
+                );
+            }
             state.space.elements().for_each(|window| {
                 window.send_frame(&winit.output, now, Some(Duration::ZERO), |_, _| {
                     Some(winit.output.clone())

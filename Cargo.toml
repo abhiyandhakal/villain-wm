@@ -28,3 +28,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 xcursor = "0.3.11"
 villain-ipc = { path = "crates/villain-ipc" }
 serde_json = "1"
+
+# Villain is frequently launched with `cargo run` while developing on a real
+# display. Keep useful debug information, but do not run the compositor and
+# Smithay's render path completely unoptimized.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
