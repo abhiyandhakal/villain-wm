@@ -14,10 +14,13 @@ Both Villain backends use the same callback scheduler. For the nested backend,
 start `villain --winit` with a private runtime directory and point the test at
 its socket. For a direct DRM test, run it in the active Villain TTY session.
 
-The separate XWayland input regression uses a private headless compositor:
+The native Wayland window-request regression and XWayland input regression use
+private headless compositors. They exercise fullscreen transitions, restoration,
+fixed-size hints, parent dialogs, background requests, and pointer move/resize
+grabs. XWayland must be installed for its test. Run both with:
 
 ```sh
 test_runtime=$(mktemp -d)
 XDG_RUNTIME_DIR="$test_runtime" XDG_CONFIG_HOME="$test_runtime" \
-  cargo test -p villain x11_workspace_input_isolation -- --ignored --nocapture
+  cargo test -p villain -- --ignored --nocapture --test-threads=1
 ```

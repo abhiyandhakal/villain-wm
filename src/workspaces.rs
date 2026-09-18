@@ -15,12 +15,15 @@ use villain_ipc::{WindowId, WindowInfo, WorkspaceInfo};
 pub struct Workspace {
     windows: Vec<WorkspaceWindow>,
     minimized_history: Vec<Window>,
+    fullscreen: Option<WindowId>,
 }
 
 struct WorkspaceWindow {
     id: WindowId,
     window: Window,
     minimized: bool,
+    parent: Option<WindowId>,
+    floating: Option<Rectangle<i32, smithay::utils::Logical>>,
 }
 
 #[derive(Clone, Copy)]
@@ -60,7 +63,345 @@ fn master_stack_layout(
     }
 }
 
+type Geometry = Rectangle<i32, smithay::utils::Logical>;
+type WindowPlacement = (Window, Geometry, bool, bool, bool);
+
+fn fixed_size(
+    min: Size<i32, smithay::utils::Logical>,
+    max: Size<i32, smithay::utils::Logical>,
+) -> bool {
+    min.w > 0 && min.h > 0 && min == max
+}
+
+pub(crate) fn constrain_geometry(
+    mut rect: Geometry,
+    output: Size<i32, smithay::utils::Logical>,
+    min: Size<i32, smithay::utils::Logical>,
+    max: Size<i32, smithay::utils::Logical>,
+) -> Geometry {
+    let limit = |size: i32, min: i32, max: i32, output: i32| {
+        let upper = if max > 0 { max.min(output) } else { output }.max(1);
+        size.clamp(min.max(1).min(upper), upper)
+    };
+    rect.size.w = limit(rect.size.w, min.w, max.w, output.w);
+    rect.size.h = limit(rect.size.h, min.h, max.h, output.h);
+    rect.loc.x = rect.loc.x.clamp(0, (output.w - rect.size.w).max(0));
+    rect.loc.y = rect.loc.y.clamp(0, (output.h - rect.size.h).max(0));
+    rect
+}
+
+impl Workspace {
+    fn descendant_of(&self, entry: &WorkspaceWindow, ancestor: WindowId) -> bool {
+        let mut parent = entry.parent;
+        for _ in 0..self.windows.len() {
+            let Some(id) = parent else {
+                break;
+            };
+            if id == ancestor {
+                return true;
+            }
+            parent = self
+                .windows
+                .iter()
+                .find(|entry| entry.id == id)
+                .and_then(|entry| entry.parent);
+        }
+        false
+    }
+
+    fn hidden_by_parent(&self, entry: &WorkspaceWindow) -> bool {
+        self.windows
+            .iter()
+            .any(|parent| parent.minimized && self.descendant_of(entry, parent.id))
+    }
+}
+
 impl Villain {
+    pub(crate) fn window_constraints(
+        window: &Window,
+    ) -> (
+        Size<i32, smithay::utils::Logical>,
+        Size<i32, smithay::utils::Logical>,
+    ) {
+        if let Some(surface) = window.toplevel() {
+            smithay::wayland::compositor::with_states(surface.wl_surface(), |states| {
+                let mut guard = states
+                    .cached_state
+                    .get::<smithay::wayland::shell::xdg::SurfaceCachedState>();
+                let state = guard.current();
+                (state.min_size, state.max_size)
+            })
+        } else if let Some(surface) = window.x11_surface() {
+            (
+                surface.min_size().unwrap_or_default(),
+                surface.max_size().unwrap_or_default(),
+            )
+        } else {
+            (Size::default(), Size::default())
+        }
+    }
+
+    /// Apply client hints on map and when committed hints/parent relationships change.
+    pub fn refresh_window_hints(&mut self, window: &Window) {
+        let parent_window = if let Some(surface) = window.toplevel() {
+            surface
+                .parent()
+                .and_then(|surface| self.window_for_surface(&surface))
+        } else {
+            window
+                .x11_surface()
+                .and_then(|surface| surface.is_transient_for())
+                .and_then(|id| self.window_for_x11_id(id))
+        }
+        .filter(|parent| parent != window);
+        let parent = parent_window.as_ref().and_then(|parent| {
+            self.workspaces
+                .iter()
+                .enumerate()
+                .find_map(|(index, workspace)| {
+                    workspace
+                        .windows
+                        .iter()
+                        .find(|entry| entry.window == *parent)
+                        .map(|entry| (index, entry.id))
+                })
+        });
+        let Some((mut index, position)) =
+            self.workspaces
+                .iter()
+                .enumerate()
+                .find_map(|(index, workspace)| {
+                    workspace
+                        .windows
+                        .iter()
+                        .position(|entry| entry.window == *window)
+                        .map(|pos| (index, pos))
+                })
+        else {
+            return;
+        };
+        let mut changed = false;
+        let mut moved_from = None;
+        if let Some((target, _)) = parent
+            && index != target
+        {
+            let entry = self.workspaces[index].windows.remove(position);
+            self.workspaces[index]
+                .minimized_history
+                .retain(|candidate| candidate != window);
+            if self.workspaces[index].fullscreen == Some(entry.id) {
+                self.workspaces[index].fullscreen = None;
+                self.workspaces[target].fullscreen = Some(entry.id);
+            }
+            if entry.minimized {
+                self.workspaces[target]
+                    .minimized_history
+                    .push(window.clone());
+            }
+            self.workspaces[target].windows.push(entry);
+            moved_from = Some(index);
+            index = target;
+            changed = true;
+        }
+        let (min, max) = Self::window_constraints(window);
+        let floating = parent.is_some()
+            || fixed_size(min, max)
+            || window.x11_surface().is_some_and(|surface| {
+                surface.window_type() == Some(smithay::xwayland::xwm::WmWindowType::Dialog)
+            });
+        let parent_rect = parent_window
+            .as_ref()
+            .and_then(|parent| {
+                self.workspace_layout(index)
+                    .into_iter()
+                    .find(|(window, _, _, _, _)| window == parent)
+                    .map(|(_, rect, _, _, _)| rect)
+            })
+            .unwrap_or_else(|| Rectangle::from_size(self.output_size));
+        let entry = self.workspaces[index]
+            .windows
+            .iter_mut()
+            .find(|entry| entry.window == *window)
+            .unwrap();
+        let parent_id = parent.map(|(_, id)| id);
+        changed |= entry.parent != parent_id;
+        entry.parent = parent_id;
+        let geometry = if floating {
+            let geometry = entry.floating.unwrap_or_else(|| {
+                let natural = window.geometry().size;
+                let size = if fixed_size(min, max) {
+                    min
+                } else if natural.w > 0 && natural.h > 0 {
+                    natural
+                } else {
+                    (600, 400).into()
+                };
+                let size =
+                    constrain_geometry(Rectangle::from_size(size), self.output_size, min, max).size;
+                Rectangle::new(
+                    (
+                        parent_rect.loc.x + (parent_rect.size.w - size.w) / 2,
+                        parent_rect.loc.y + (parent_rect.size.h - size.h) / 2,
+                    )
+                        .into(),
+                    size,
+                )
+            });
+            Some(constrain_geometry(geometry, self.output_size, min, max))
+        } else {
+            None
+        };
+        changed |= entry.floating != geometry;
+        entry.floating = geometry;
+        if changed {
+            if index == self.active_workspace || moved_from == Some(self.active_workspace) {
+                self.relayout_active_workspace();
+            }
+            if index != self.active_workspace {
+                self.configure_workspace(index);
+            }
+        }
+    }
+
+    pub(crate) fn workspace_has_fullscreen(&self, index: usize) -> bool {
+        let workspace = &self.workspaces[index];
+        workspace.fullscreen.is_some_and(|id| {
+            workspace.windows.iter().any(|entry| {
+                entry.id == id && !entry.minimized && !workspace.hidden_by_parent(entry)
+            })
+        })
+    }
+
+    fn workspace_layout(&self, index: usize) -> Vec<WindowPlacement> {
+        let workspace = &self.workspaces[index];
+        let fullscreen = workspace.fullscreen.filter(|id| {
+            workspace.windows.iter().any(|entry| {
+                entry.id == *id && !entry.minimized && !workspace.hidden_by_parent(entry)
+            })
+        });
+        let count = workspace
+            .windows
+            .iter()
+            .filter(|entry| !entry.minimized && entry.floating.is_none())
+            .count();
+        let mut tiles = master_stack_layout(self.output_size, count).into_iter();
+        let mut result = Vec::new();
+        for entry in &workspace.windows {
+            let is_fullscreen = workspace.fullscreen == Some(entry.id);
+            let base = if let Some(rect) = entry.floating {
+                let (min, max) = Self::window_constraints(&entry.window);
+                constrain_geometry(rect, self.output_size, min, max)
+            } else if !entry.minimized {
+                let (loc, size) = tiles.next().unwrap();
+                Rectangle::new(loc, size)
+            } else {
+                Rectangle::from_size(self.output_size)
+            };
+            let rect = if is_fullscreen {
+                Rectangle::from_size(self.output_size)
+            } else {
+                base
+            };
+            let visible = !entry.minimized
+                && !workspace.hidden_by_parent(entry)
+                && fullscreen.is_none_or(|owner| {
+                    owner == entry.id
+                        || (entry.floating.is_some() && workspace.descendant_of(entry, owner))
+                });
+            result.push((
+                entry.window.clone(),
+                rect,
+                is_fullscreen,
+                entry.floating.is_none(),
+                visible,
+            ));
+        }
+        // Map tiles first, then fullscreen, then its floating dialogs.
+        result.sort_by_key(|(_, _, fullscreen, tiled, _)| {
+            if *fullscreen {
+                1
+            } else if *tiled {
+                0
+            } else {
+                2
+            }
+        });
+        result
+    }
+
+    fn configure_workspace(&self, index: usize) {
+        for (window, rect, fullscreen, tiled, _) in self.workspace_layout(index) {
+            Self::configure_window(&window, rect.loc, rect.size, fullscreen, tiled);
+        }
+    }
+
+    pub fn set_window_fullscreen(&mut self, window: &Window, fullscreen: bool) {
+        let Some(index) = self.workspace_for_window(window) else {
+            return;
+        };
+        let Some(entry) = self.workspaces[index]
+            .windows
+            .iter()
+            .find(|entry| entry.window == *window)
+        else {
+            return;
+        };
+        let id = entry.id;
+        if fullscreen == (self.workspaces[index].fullscreen == Some(id)) {
+            // xdg-shell requires a configure response even to a repeated request.
+            if let Some(surface) = window.toplevel() {
+                surface.send_configure();
+            }
+            return;
+        }
+        if fullscreen {
+            self.workspaces[index].fullscreen = Some(id);
+        } else if self.workspaces[index].fullscreen == Some(id) {
+            self.workspaces[index].fullscreen = None;
+        }
+        if index == self.active_workspace {
+            self.release_pointer_buttons();
+            self.relayout_active_workspace();
+        } else {
+            self.configure_workspace(index);
+        }
+    }
+
+    pub(crate) fn floating_geometry(&self, window: &Window) -> Option<Geometry> {
+        let workspace = &self.workspaces[self.workspace_for_window(window)?];
+        workspace
+            .windows
+            .iter()
+            .find(|entry| {
+                entry.window == *window
+                    && !entry.minimized
+                    && workspace.fullscreen != Some(entry.id)
+            })
+            .and_then(|entry| entry.floating)
+    }
+
+    /// Configure/map a floating window without re-entering pointer dispatch.
+    pub(crate) fn set_floating_geometry(&mut self, window: &Window, geometry: Geometry) {
+        if self.floating_geometry(window).is_none() {
+            return;
+        }
+        let (min, max) = Self::window_constraints(window);
+        let geometry = constrain_geometry(geometry, self.output_size, min, max);
+        let index = self.workspace_for_window(window).unwrap();
+        let entry = self.workspaces[index]
+            .windows
+            .iter_mut()
+            .find(|entry| entry.window == *window)
+            .unwrap();
+        entry.floating = Some(geometry);
+        Self::configure_window(window, geometry.loc, geometry.size, false, false);
+        if self.space.element_location(window).is_some() {
+            self.space.map_element(window.clone(), geometry.loc, false);
+            self.sync_x11_stacking();
+            self.request_repaint();
+        }
+    }
+
     pub fn spawn(&mut self, argv: Vec<String>) -> std::io::Result<()> {
         let Some((program, arguments)) = argv.split_first() else {
             return Err(std::io::Error::new(
@@ -111,17 +452,44 @@ impl Villain {
         window: &Window,
         location: Point<i32, smithay::utils::Logical>,
         size: Size<i32, smithay::utils::Logical>,
+        fullscreen: bool,
+        tiled: bool,
     ) {
         if let Some(surface) = window.toplevel() {
             surface.with_pending_state(|pending| {
                 pending.size = Some(size);
-                pending.states.unset(xdg_toplevel::State::Fullscreen);
+                for state in [
+                    xdg_toplevel::State::TiledLeft,
+                    xdg_toplevel::State::TiledRight,
+                    xdg_toplevel::State::TiledTop,
+                    xdg_toplevel::State::TiledBottom,
+                ] {
+                    if tiled && !fullscreen {
+                        pending.states.set(state);
+                    } else {
+                        pending.states.unset(state);
+                    }
+                }
+                if fullscreen {
+                    pending.states.set(xdg_toplevel::State::Fullscreen);
+                } else {
+                    pending.states.unset(xdg_toplevel::State::Fullscreen);
+                    pending.fullscreen_output = None;
+                }
             });
             surface.send_pending_configure();
-        } else if let Some(surface) = window.x11_surface()
-            && let Err(error) = surface.configure(Rectangle::new(location, size))
-        {
-            tracing::warn!(%error, window = surface.window_id(), "could not tile X11 window");
+        } else if let Some(surface) = window.x11_surface() {
+            if surface.is_fullscreen() != fullscreen
+                && let Err(error) = surface.set_fullscreen(fullscreen)
+            {
+                tracing::warn!(%error, "could not update X11 fullscreen state");
+            }
+            let geometry = Rectangle::new(location, size);
+            if surface.geometry() != geometry
+                && let Err(error) = surface.configure(geometry)
+            {
+                tracing::warn!(%error, window = surface.window_id(), "could not configure X11 window");
+            }
         }
     }
 
@@ -160,9 +528,12 @@ impl Villain {
         self.next_window_id += 1;
         self.workspaces[index].windows.push(WorkspaceWindow {
             id,
-            window,
+            window: window.clone(),
             minimized: false,
+            parent: None,
+            floating: None,
         });
+        self.refresh_window_hints(&window);
         tracing::info!(window = id.0, workspace = index + 1, "window opened");
         if index == self.active_workspace {
             self.relayout_active_workspace();
@@ -215,32 +586,37 @@ impl Villain {
             self.space.unmap_elem(&window);
         }
 
-        let visible: Vec<_> = self.workspaces[self.active_workspace]
-            .windows
-            .iter()
-            .filter(|entry| !entry.minimized)
-            .map(|entry| entry.window.clone())
-            .collect();
-        let visible_count = visible.len();
-        for (window, (location, size)) in visible
-            .into_iter()
-            .zip(master_stack_layout(self.output_size, visible_count))
+        for (window, geometry, fullscreen, tiled, visible) in
+            self.workspace_layout(self.active_workspace)
         {
-            Self::configure_window(&window, location, size);
-            self.space.map_element(window, location, false);
+            Self::configure_window(&window, geometry.loc, geometry.size, fullscreen, tiled);
+            if visible {
+                self.space.map_element(window, geometry.loc, false);
+            } else {
+                Self::set_activated(&window, false);
+            }
         }
         self.refresh_unmanaged_x11_windows();
         self.sync_x11_stacking();
         // An implicit button grab must not survive minimizing its window.
-        if self.pointer.current_focus().is_some_and(|surface| {
-            let root =
-                std::iter::successors(Some(surface), smithay::wayland::compositor::get_parent)
-                    .last()
-                    .unwrap();
-            !self
-                .window_for_surface(&root)
-                .is_some_and(|window| self.space.element_location(&window).is_some())
-        }) {
+        if self
+            .pointer
+            .current_focus()
+            .or_else(|| {
+                self.pointer
+                    .grab_start_data()
+                    .and_then(|start| start.focus.map(|(surface, _)| surface))
+            })
+            .is_some_and(|surface| {
+                let root =
+                    std::iter::successors(Some(surface), smithay::wayland::compositor::get_parent)
+                        .last()
+                        .unwrap();
+                !self
+                    .window_for_surface(&root)
+                    .is_some_and(|window| self.space.element_location(&window).is_some())
+            })
+        {
             self.release_pointer_buttons();
         }
         self.refresh_pointer(0);
@@ -254,7 +630,7 @@ impl Villain {
             && let Some(window) = self.workspaces[self.active_workspace]
                 .windows
                 .iter()
-                .find(|entry| !entry.minimized)
+                .find(|entry| self.space.element_location(&entry.window).is_some())
                 .map(|entry| entry.window.clone())
             && let Some(surface) = KeyboardFocus::for_window(&window)
         {
@@ -351,7 +727,7 @@ impl Villain {
                         .map(|entry| {
                             (
                                 workspace,
-                                entry.minimized,
+                                entry.minimized || state.hidden_by_parent(entry),
                                 KeyboardFocus::for_window(&entry.window),
                             )
                         })
@@ -361,6 +737,16 @@ impl Villain {
         }
         if workspace != self.active_workspace {
             self.switch_workspace(workspace);
+        }
+        if !self
+            .workspace_layout(workspace)
+            .iter()
+            .any(|(window, _, _, _, visible)| {
+                *visible && KeyboardFocus::for_window(window) == surface
+            })
+        {
+            self.workspaces[workspace].fullscreen = None;
+            self.relayout_active_workspace();
         }
         let Some(surface) = surface else {
             return Some(false);
@@ -434,6 +820,8 @@ impl Villain {
                         app_id,
                         workspace: workspace + 1,
                         minimized: entry.minimized,
+                        floating: entry.floating.is_some(),
+                        fullscreen: state.fullscreen == Some(entry.id),
                         focused: focused
                             .as_ref()
                             .is_some_and(|focused| wl_surface.as_ref() == Some(focused)),
@@ -451,10 +839,10 @@ impl Villain {
                 workspace: index + 1,
                 active: index == self.active_workspace,
                 window_count: workspace.windows.len(),
-                visible_window_count: workspace
-                    .windows
+                visible_window_count: self
+                    .workspace_layout(index)
                     .iter()
-                    .filter(|entry| !entry.minimized)
+                    .filter(|(_, _, _, _, visible)| *visible)
                     .count(),
             })
             .collect()
@@ -599,7 +987,9 @@ impl Villain {
     pub fn refresh_pointer(&mut self, time: u32) {
         self.request_repaint();
         self.refresh_pointer_surface(time);
-        self.focus_window_at_pointer();
+        if !self.pointer.is_grabbed() {
+            self.focus_window_at_pointer();
+        }
     }
 
     pub fn refresh_pointer_surface(&mut self, time: u32) {
@@ -663,6 +1053,13 @@ impl Villain {
                 .extract_if(.., |entry| &entry.window == target)
                 .map(|entry| entry.window)
                 .collect();
+            if !workspace
+                .windows
+                .iter()
+                .any(|entry| Some(entry.id) == workspace.fullscreen)
+            {
+                workspace.fullscreen = None;
+            }
             for window in removed {
                 self.space.unmap_elem(&window);
                 workspace
@@ -710,3 +1107,7 @@ mod tests {
         assert_eq!(layout[3], ((400, 400).into(), (401, 201).into()));
     }
 }
+
+#[cfg(test)]
+#[path = "window_tests.rs"]
+mod request_tests;

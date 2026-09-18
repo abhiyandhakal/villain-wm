@@ -20,6 +20,10 @@ pub struct WindowInfo {
     /// Human-facing, one-based workspace number.
     pub workspace: usize,
     pub minimized: bool,
+    #[serde(default)]
+    pub floating: bool,
+    #[serde(default)]
+    pub fullscreen: bool,
     pub focused: bool,
 }
 

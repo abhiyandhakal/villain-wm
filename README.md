@@ -242,6 +242,24 @@ their creation order: the first visible window is the master and later windows
 append to the stack. A minimized window keeps its place in that order but is
 left out of the visible layout until restored.
 
+Child dialogs and fixed-size windows float above the tiles. Dialogs belong to
+their parent's workspace and start centered over it; standalone fixed-size
+windows start centered on the output. Floating windows honor client size limits
+and stay within the output. Applications can initiate title-bar moves and edge
+resizes while a pointer button is held on their window.
+
+App-requested fullscreen fills the current output and temporarily hides the
+workspace's other windows, except the fullscreen app's child dialogs. Exiting
+fullscreen restores the tiled layout or the floating window's previous geometry.
+A fullscreen request on an inactive workspace does not switch workspaces.
+Minimizing a fullscreen window reveals the workspace; restoring it restores
+fullscreen. Explicitly focusing a window hidden behind fullscreen exits fullscreen.
+These behaviors apply to both native Wayland and XWayland applications.
+
+`villainctl windows` reports `floating` and `fullscreen` alongside the existing
+window state. `floating` describes the window's normal layout, including while
+it is temporarily fullscreen.
+
 ### Current controls
 
 The temporary mod key is `Alt` while Villain is being tested.

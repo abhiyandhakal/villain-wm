@@ -21,7 +21,7 @@ use smithay::{
     },
     xwayland::{
         X11Surface, X11Wm, XWayland, XWaylandEvent, XwmHandler,
-        xwm::{Reorder, ResizeEdge, X11Window, XwmId},
+        xwm::{Reorder, ResizeEdge, WmWindowProperty, X11Window, XwmId},
     },
 };
 
@@ -51,6 +51,7 @@ impl Villain {
         for entry in &self.unmanaged_x11_windows {
             self.space.unmap_elem(&entry.window);
             if entry.workspace == self.active_workspace
+                && (!self.workspace_has_fullscreen(self.active_workspace) || entry.parent.is_some())
                 && entry
                     .parent
                     .as_ref()
@@ -152,7 +153,11 @@ impl XwmHandler for Villain {
             tracing::warn!(%error, window = window.window_id(), "could not map X11 window");
             return;
         }
-        self.add_x11_window(window);
+        let fullscreen = window.is_fullscreen();
+        self.add_x11_window(window.clone());
+        if fullscreen && let Some(window) = self.window_for_x11_surface(&window) {
+            self.set_window_fullscreen(&window, true);
+        }
     }
 
     fn map_window_notify(&mut self, _xwm: XwmId, _window: X11Surface) {
@@ -207,8 +212,24 @@ impl XwmHandler for Villain {
         height: Option<u32>,
         _reorder: Option<Reorder>,
     ) {
-        if !window.is_override_redirect() && self.window_for_x11_surface(&window).is_some() {
-            self.relayout_active_workspace();
+        if !window.is_override_redirect()
+            && let Some(managed) = self.window_for_x11_surface(&window)
+        {
+            if let Some(mut geometry) = self.floating_geometry(&managed) {
+                geometry.loc.x = x.unwrap_or(geometry.loc.x);
+                geometry.loc.y = y.unwrap_or(geometry.loc.y);
+                geometry.size.w = width
+                    .and_then(|value| i32::try_from(value).ok())
+                    .unwrap_or(geometry.size.w);
+                geometry.size.h = height
+                    .and_then(|value| i32::try_from(value).ok())
+                    .unwrap_or(geometry.size.h);
+                self.set_floating_geometry(&managed, geometry);
+            }
+            // Also acknowledge requests denied by tiling/fullscreen policy.
+            if let Err(error) = window.configure(None) {
+                tracing::warn!(%error, "could not acknowledge X11 configure request");
+            }
             return;
         }
 
@@ -248,22 +269,55 @@ impl XwmHandler for Villain {
         }
     }
 
+    fn property_notify(&mut self, _xwm: XwmId, surface: X11Surface, property: WmWindowProperty) {
+        if matches!(
+            property,
+            WmWindowProperty::NormalHints
+                | WmWindowProperty::TransientFor
+                | WmWindowProperty::WindowType
+        ) && let Some(window) = self.window_for_x11_surface(&surface)
+        {
+            self.refresh_window_hints(&window);
+        }
+    }
+
+    fn fullscreen_request(&mut self, _xwm: XwmId, surface: X11Surface) {
+        if let Some(window) = self.window_for_x11_surface(&surface) {
+            self.set_window_fullscreen(&window, true);
+        }
+    }
+
+    fn unfullscreen_request(&mut self, _xwm: XwmId, surface: X11Surface) {
+        if let Some(window) = self.window_for_x11_surface(&surface) {
+            self.set_window_fullscreen(&window, false);
+        }
+    }
+
     fn minimize_request(&mut self, _xwm: XwmId, surface: X11Surface) {
         if let Some(window) = self.window_for_x11_surface(&surface) {
             self.apply_window_action(&window, WindowAction::Minimize);
         }
     }
 
-    fn resize_request(
-        &mut self,
-        _xwm: XwmId,
-        _window: X11Surface,
-        _button: u32,
-        _resize_edge: ResizeEdge,
-    ) {
+    fn resize_request(&mut self, _xwm: XwmId, surface: X11Surface, button: u32, edge: ResizeEdge) {
+        if self.x11_grab_button_matches(button)
+            && let Some(window) = self.window_for_x11_surface(&surface)
+        {
+            self.start_window_grab(
+                window,
+                None,
+                Some(crate::window_grab::ResizeEdges::from_x11(edge)),
+            );
+        }
     }
 
-    fn move_request(&mut self, _xwm: XwmId, _window: X11Surface, _button: u32) {}
+    fn move_request(&mut self, _xwm: XwmId, surface: X11Surface, button: u32) {
+        if self.x11_grab_button_matches(button)
+            && let Some(window) = self.window_for_x11_surface(&surface)
+        {
+            self.start_window_grab(window, None, None);
+        }
+    }
 
     fn allow_selection_access(&mut self, _xwm: XwmId, _selection: SelectionTarget) -> bool {
         self.keyboard
@@ -598,5 +652,202 @@ mod tests {
             conn.get_input_focus().unwrap().reply().unwrap().focus,
             first
         );
+        // Exercise real EWMH fullscreen requests and ICCCM floating hints.
+        let other = create(false, None);
+        pump_until(&mut event_loop, &mut state, |state| {
+            state.window_for_x11_id(other).is_some()
+        });
+        let dialog = create(false, Some(first));
+        pump_until(&mut event_loop, &mut state, |state| {
+            state
+                .window_for_x11_id(dialog)
+                .is_some_and(|window| window.x11_surface().unwrap().wl_surface().is_some())
+        });
+        conn.configure_window(
+            dialog,
+            &ConfigureWindowAux::new()
+                .x(100)
+                .y(100)
+                .width(300)
+                .height(200),
+        )
+        .unwrap();
+        conn.flush().unwrap();
+        pump_until(&mut event_loop, &mut state, |state| {
+            state
+                .window_for_x11_id(dialog)
+                .unwrap()
+                .x11_surface()
+                .unwrap()
+                .geometry()
+                .size
+                == (300, 200).into()
+        });
+        let dialog_window = state.window_for_x11_id(dialog).unwrap();
+        let saved = state.floating_geometry(&dialog_window).unwrap();
+        let fullscreen_atom = conn
+            .intern_atom(false, b"_NET_WM_STATE_FULLSCREEN")
+            .unwrap()
+            .reply()
+            .unwrap()
+            .atom;
+        let wm_state = conn
+            .intern_atom(false, b"_NET_WM_STATE")
+            .unwrap()
+            .reply()
+            .unwrap()
+            .atom;
+        let fullscreen = |id, enabled| {
+            conn.send_event(
+                false,
+                root,
+                EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY,
+                ClientMessageEvent::new(
+                    32,
+                    id,
+                    wm_state,
+                    [u32::from(enabled), fullscreen_atom, 0, 1, 0],
+                ),
+            )
+            .unwrap();
+            conn.flush().unwrap();
+        };
+        fullscreen(first, true);
+        pump_until(&mut event_loop, &mut state, |state| {
+            state
+                .window_for_x11_id(first)
+                .unwrap()
+                .x11_surface()
+                .unwrap()
+                .is_fullscreen()
+        });
+        assert_eq!(
+            conn.get_geometry(first).unwrap().reply().unwrap().width,
+            800
+        );
+        assert!(state.space.element_location(&dialog_window).is_some());
+        assert!(
+            state
+                .space
+                .element_location(&state.window_for_x11_id(other).unwrap())
+                .is_none()
+        );
+        fullscreen(first, false);
+        pump_until(&mut event_loop, &mut state, |state| {
+            !state
+                .window_for_x11_id(first)
+                .unwrap()
+                .x11_surface()
+                .unwrap()
+                .is_fullscreen()
+        });
+        assert_eq!(
+            conn.get_geometry(first).unwrap().reply().unwrap().width,
+            400
+        );
+        fullscreen(dialog, true);
+        pump_until(&mut event_loop, &mut state, |state| {
+            state
+                .window_for_x11_id(dialog)
+                .unwrap()
+                .x11_surface()
+                .unwrap()
+                .is_fullscreen()
+        });
+        assert_eq!(
+            conn.get_geometry(dialog).unwrap().reply().unwrap().width,
+            800
+        );
+        fullscreen(dialog, false);
+        pump_until(&mut event_loop, &mut state, |state| {
+            !state
+                .window_for_x11_id(dialog)
+                .unwrap()
+                .x11_surface()
+                .unwrap()
+                .is_fullscreen()
+        });
+        assert_eq!(state.floating_geometry(&dialog_window), Some(saved));
+        assert_eq!(
+            conn.get_geometry(dialog).unwrap().reply().unwrap().width,
+            300
+        );
+
+        let fixed = create(false, None);
+        let hints = smithay::reexports::x11rb::properties::WmSizeHints {
+            min_size: Some((240, 180)),
+            max_size: Some((240, 180)),
+            ..Default::default()
+        };
+        hints.set_normal_hints(&conn, fixed).unwrap();
+        conn.flush().unwrap();
+        pump_until(&mut event_loop, &mut state, |state| {
+            state
+                .window_for_x11_id(fixed)
+                .is_some_and(|window| state.floating_geometry(&window).is_some())
+        });
+        assert_eq!(
+            conn.get_geometry(fixed).unwrap().reply().unwrap().width,
+            240
+        );
+        // A client cannot move another window or start a drag without a button.
+        state.start_window_grab(dialog_window.clone(), None, None);
+        assert!(!state.pointer.is_grabbed());
+        state.pointer_location = (110.0, 110.0).into();
+        state.refresh_pointer(10);
+        let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+        state.pressed_buttons.insert(0x110);
+        state.pointer.clone().button(
+            &mut state,
+            &smithay::input::pointer::ButtonEvent {
+                serial,
+                time: 10,
+                button: 0x110,
+                state: smithay::backend::input::ButtonState::Pressed,
+            },
+        );
+        let fixed_window = state.window_for_x11_id(fixed).unwrap();
+        let fixed_before = state.floating_geometry(&fixed_window);
+        state.start_window_grab(fixed_window.clone(), Some(serial), None);
+        state.start_window_grab(dialog_window.clone(), Some(serial), None);
+        state.pointer_location = (160.0, 140.0).into();
+        state.refresh_pointer(11);
+        assert_eq!(
+            state.floating_geometry(&dialog_window).unwrap().loc,
+            saved.loc + smithay::utils::Point::from((50, 30))
+        );
+        assert_eq!(state.floating_geometry(&fixed_window), fixed_before);
+        state.release_pointer_buttons();
+        assert!(!state.pointer.is_grabbed());
+        let moved = state.floating_geometry(&dialog_window).unwrap();
+        state.pointer_location = (moved.loc.x as f64 + 10.0, moved.loc.y as f64 + 10.0).into();
+        state.refresh_pointer(12);
+        let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+        state.pressed_buttons.insert(0x110);
+        state.pointer.clone().button(
+            &mut state,
+            &smithay::input::pointer::ButtonEvent {
+                serial,
+                time: 12,
+                button: 0x110,
+                state: smithay::backend::input::ButtonState::Pressed,
+            },
+        );
+        state.start_window_grab(
+            dialog_window.clone(),
+            Some(serial),
+            Some(crate::window_grab::ResizeEdges::from_x11(
+                ResizeEdge::BottomRight,
+            )),
+        );
+        state.pointer_location += (50.0, 40.0).into();
+        state.refresh_pointer(13);
+        assert_eq!(
+            state.floating_geometry(&dialog_window).unwrap().size,
+            (350, 240).into()
+        );
+        state.switch_workspace(4);
+        assert!(!state.pointer.is_grabbed());
+        assert!(state.space.element_location(&dialog_window).is_none());
     }
 }

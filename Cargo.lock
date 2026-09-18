@@ -1862,6 +1862,8 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "villain-ipc",
+ "wayland-client",
+ "wayland-protocols",
  "xcursor",
 ]
 
