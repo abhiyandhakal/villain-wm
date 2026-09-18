@@ -4,12 +4,18 @@
 //! Both backends use the same Wayland protocol and workspace state.
 
 mod backend_selection;
+mod config;
+mod cursor;
+mod dispatch;
 mod handlers;
+mod ipc;
 mod keybinds;
 mod render;
+mod session;
 mod state;
 mod tty;
 mod workspaces;
+mod xwayland;
 
 use smithay::reexports::{calloop::EventLoop, wayland_server::Display};
 use state::Villain;
@@ -35,25 +41,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "selected backend"
     );
     // Parse options before creating sockets so --help works without a session.
-    let mut event_loop: EventLoop<Villain> = EventLoop::try_new()?;
+    let mut event_loop: EventLoop<'static, Villain> = EventLoop::try_new()?;
     let display = Display::new()?;
-    let mut state = Villain::new(&mut event_loop, display);
+    let config = config::RuntimeConfig::load()?;
+    let mut state = Villain::new(&mut event_loop, display, config);
+    state.owns_session = direct;
+    session::prepare_environment(&mut state);
+    xwayland::init(&mut event_loop, &mut state);
     if direct {
         tty::init(&mut event_loop, &mut state)?;
     } else {
         render::init_winit(&mut event_loop, &mut state)?;
     }
+    if direct {
+        session::activate(&state, true);
+    }
 
     tracing::info!(socket = ?state.socket_name, "Villain is ready");
-    event_loop.run(
-        Some(std::time::Duration::from_millis(16)),
-        &mut state,
-        |state| {
-            state.reap_children();
-            state.space.refresh();
-            let _ = state.display_handle.flush_clients();
-        },
-    )?;
+    state.render_if_needed();
+    event_loop.run(None, &mut state, |state| {
+        state.reap_children();
+        state.space.refresh();
+        let _ = state.display_handle.flush_clients();
+        state.render_if_needed();
+    })?;
 
     Ok(())
 }

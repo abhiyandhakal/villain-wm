@@ -14,15 +14,7 @@ use smithay::{
             PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
         },
         libinput::{LibinputInputBackend, LibinputSessionInterface},
-        renderer::{
-            Bind,
-            damage::OutputDamageTracker,
-            element::{
-                Kind,
-                solid::{SolidColorBuffer, SolidColorRenderElement},
-            },
-            gles::GlesRenderer,
-        },
+        renderer::{Bind, damage::OutputDamageTracker, gles::GlesRenderer},
         session::{Event as SessionEvent, Session, libseat::LibSeatSession},
         udev::{all_gpus, primary_gpu},
     },
@@ -30,10 +22,7 @@ use smithay::{
     input::pointer::{AxisFrame, ButtonEvent},
     output::{Mode, Output, PhysicalProperties, Subpixel},
     reexports::{
-        calloop::{
-            EventLoop,
-            timer::{TimeoutAction, Timer},
-        },
+        calloop::EventLoop,
         drm::control::{Device, ModeTypeFlags, connector},
         input::Libinput,
         rustix::fs::OFlags,
@@ -51,10 +40,10 @@ pub struct Tty {
     drm: DrmDevice,
     output: Output,
     damage: OutputDamageTracker,
-    cursor: SolidColorBuffer,
     active: bool,
     pending: bool,
     pub session: LibSeatSession,
+    input_devices: Vec<smithay::reexports::input::Device>,
 }
 
 pub fn init(
@@ -161,10 +150,10 @@ pub fn init(
         drm,
         output,
         damage,
-        cursor: SolidColorBuffer::new((10, 16), [1.0, 1.0, 1.0, 1.0]),
         active: true,
         pending: false,
         session: session.clone(),
+        input_devices: Vec::new(),
     });
 
     let mut input =
@@ -188,8 +177,12 @@ pub fn init(
                         tty.pending = false;
                     }
                     DrmEvent::Error(error) => {
-                        tracing::error!(%error, "DRM event failed");
-                        state.loop_signal.stop();
+                        // Revoking DRM master during a VT switch can invalidate
+                        // an outstanding page flip. This is recoverable.
+                        tracing::warn!(%error, "DRM event failed; scheduling a fresh frame");
+                        tty.pending = false;
+                        tty.surface.reset_buffers();
+                        state.request_repaint();
                     }
                 }
             }
@@ -216,47 +209,41 @@ pub fn init(
                 state.refresh_pointer(0);
                 if let Some(tty) = state.tty.as_mut() {
                     tty.active = false;
-                    // A VT switch can prevent delivery of the last flip event.
-                    // Retire that in-flight buffer before starting a fresh frame.
-                    let _ = tty.surface.frame_submitted();
                     tty.drm.pause();
+                    // A VT switch can prevent delivery of the last flip event.
+                    // Retire only a frame Villain actually submitted.
+                    if tty.pending
+                        && let Err(error) = tty.surface.frame_submitted()
+                    {
+                        tracing::debug!(%error, "could not retire paused DRM frame");
+                    }
+                    tty.pending = false;
+                    tty.surface.reset_buffers();
                 }
+                tracing::info!("TTY session paused");
             }
             SessionEvent::ActivateSession => {
-                let result = state.tty.as_mut().unwrap().drm.activate(true);
-                if let Err(error) = result {
-                    tracing::error!(%error, "DRM resume failed");
-                    state.loop_signal.stop();
-                    return;
-                }
                 if let Err(error) = input.resume() {
-                    tracing::error!(?error, "input resume failed");
-                    state.loop_signal.stop();
-                    return;
+                    // Smithay's reference backend keeps the recovered display
+                    // alive even if an input device fails to resume.
+                    tracing::warn!(?error, "input resume failed");
                 }
                 let tty = state.tty.as_mut().unwrap();
+                // Preserve connector state. Resetting every connector here
+                // invalidates the existing DRM surface during VT handoff.
+                if let Err(error) = tty.drm.activate(false) {
+                    tracing::error!(%error, "DRM resume failed; waiting for another activation");
+                    return;
+                }
                 tty.surface.reset_buffers();
                 tty.pending = false;
                 tty.active = true;
                 tty.damage = OutputDamageTracker::from_output(&tty.output);
                 state.host_focused = true;
                 state.refresh_pointer(0);
+                state.request_repaint();
+                tracing::info!("TTY session resumed");
             }
-        })?;
-    event_loop
-        .handle()
-        .insert_source(Timer::immediate(), |_, _, state| {
-            if let Some(mut tty) = state.tty.take() {
-                if tty.active
-                    && !tty.pending
-                    && let Err(error) = tty.render(state)
-                {
-                    tracing::error!(%error, "DRM render failed; exiting to release the seat");
-                    state.loop_signal.stop();
-                }
-                state.tty = Some(tty);
-            }
-            TimeoutAction::ToDuration(Duration::from_millis(8))
         })?;
     tracing::info!(gpu = %path.display(), ?size, "TTY backend ready; Ctrl+Alt+Backspace exits, Ctrl+Alt+F1–F12 switches VT");
     Ok(())
@@ -264,48 +251,81 @@ pub fn init(
 
 impl Tty {
     fn render(&mut self, state: &mut Villain) -> Result<(), Box<dyn Error>> {
-        let (mut buffer, _age) = self.surface.next_buffer()?;
-        let cursor = SolidColorRenderElement::from_buffer(
-            &self.cursor,
-            (
-                state.pointer_location.x as i32,
-                state.pointer_location.y as i32,
-            ),
-            1.0,
-            1.0,
-            Kind::Cursor,
-        );
+        let (mut buffer, age) = self.surface.next_buffer()?;
         let mut framebuffer = self.renderer.bind(&mut buffer)?;
-        // Repaint the whole buffer for now: no buffer-age optimization yet.
+        let now = state.start_time.elapsed();
+        let cursor_elements =
+            state
+                .cursor
+                .render_elements(&mut self.renderer, state.pointer_location, now);
         let result = render_output(
             &self.output,
             &mut self.renderer,
             &mut framebuffer,
             1.0,
-            0,
+            usize::from(age),
             [&state.space],
-            &[cursor],
+            &cursor_elements,
             &mut self.damage,
             [0.08, 0.05, 0.12, 1.0],
         )?;
         let sync = result.sync.clone();
+        let damage = result.damage.cloned();
         drop(framebuffer);
-        self.surface.queue_buffer(Some(sync), None, ())?;
-        self.pending = true;
-        for window in state.space.elements() {
-            window.send_frame(
-                &self.output,
-                state.start_time.elapsed(),
-                Some(Duration::ZERO),
-                |_, _| Some(self.output.clone()),
-            );
+        let submitted = if let Some(damage) = damage {
+            self.surface.queue_buffer(Some(sync), Some(damage), ())?;
+            self.pending = true;
+            true
+        } else {
+            false
+        };
+        if submitted {
+            for window in state.space.elements() {
+                window.send_frame(&self.output, now, Some(Duration::ZERO), |_, _| {
+                    Some(self.output.clone())
+                });
+            }
+            state.cursor.send_frame(&self.output, now);
         }
+        let delay = state.cursor.next_animation_delay(now);
+        state.schedule_cursor_frame(delay);
         Ok(())
     }
 }
 
+pub fn render_if_needed(state: &mut Villain) {
+    let Some(mut tty) = state.tty.take() else {
+        return;
+    };
+    if !tty.active || tty.pending {
+        state.tty = Some(tty);
+        return;
+    }
+    state.repaint_needed = false;
+    if let Err(error) = tty.render(state) {
+        // The first frame after regaining DRM master can race the kernel
+        // handoff. Keep the damage pending for the next real event.
+        tracing::warn!(%error, "DRM render failed; resetting buffers");
+        tty.pending = false;
+        tty.surface.reset_buffers();
+        state.repaint_needed = true;
+    }
+    state.tty = Some(tty);
+}
+
 fn process_input(event: InputEvent<LibinputInputBackend>, state: &mut Villain) {
     match event {
+        InputEvent::DeviceAdded { mut device } => {
+            configure_input_device(&mut device, state.config.input);
+            if let Some(tty) = state.tty.as_mut() {
+                tty.input_devices.push(device);
+            }
+        }
+        InputEvent::DeviceRemoved { device } => {
+            if let Some(tty) = state.tty.as_mut() {
+                tty.input_devices.retain(|candidate| candidate != &device);
+            }
+        }
         InputEvent::Keyboard { event } => crate::keybinds::handle_keyboard_event(state, event),
         InputEvent::PointerMotion { event } => {
             state.pointer_location += event.delta();
@@ -372,5 +392,40 @@ fn process_input(event: InputEvent<LibinputInputBackend>, state: &mut Villain) {
             pointer.frame(state);
         }
         _ => {}
+    }
+}
+
+fn configure_input_device(
+    device: &mut smithay::reexports::input::Device,
+    config: crate::config::InputConfig,
+) {
+    if device.config_tap_finger_count() > 0
+        && let Err(error) = device.config_tap_set_enabled(config.tap_to_click)
+    {
+        tracing::warn!(
+            device = device.name(),
+            ?error,
+            "could not configure tap-to-click"
+        );
+    }
+    if device.config_scroll_has_natural_scroll()
+        && let Err(error) = device.config_scroll_set_natural_scroll_enabled(config.natural_scroll)
+    {
+        tracing::warn!(
+            device = device.name(),
+            ?error,
+            "could not configure natural scrolling"
+        );
+    }
+}
+
+impl Villain {
+    pub fn apply_input_config(&mut self) {
+        let config = self.config.input;
+        if let Some(tty) = self.tty.as_mut() {
+            for device in &mut tty.input_devices {
+                configure_input_device(device, config);
+            }
+        }
     }
 }

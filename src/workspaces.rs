@@ -4,10 +4,12 @@ use smithay::{
     desktop::{Window, WindowSurfaceType},
     input::pointer::MotionEvent,
     reexports::{wayland_protocols::xdg::shell::server::xdg_toplevel, wayland_server::Resource},
-    utils::{Point, SERIAL_COUNTER, Size},
-    wayland::shell::xdg::ToplevelSurface,
+    utils::{Point, Rectangle, SERIAL_COUNTER, Size},
+    wayland::{seat::WaylandFocus, shell::xdg::ToplevelSurface},
+    xwayland::X11Surface,
 };
 use std::process::Command;
+use villain_ipc::{WindowId, WindowInfo, WorkspaceInfo};
 
 #[derive(Default)]
 pub struct Workspace {
@@ -16,8 +18,15 @@ pub struct Workspace {
 }
 
 struct WorkspaceWindow {
+    id: WindowId,
     window: Window,
     minimized: bool,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum WindowAction {
+    Close,
+    Minimize,
 }
 
 fn master_stack_layout(
@@ -52,30 +61,37 @@ fn master_stack_layout(
 }
 
 impl Villain {
-    pub fn launch_terminal(&mut self) {
+    pub fn spawn(&mut self, argv: Vec<String>) -> std::io::Result<()> {
+        let Some((program, arguments)) = argv.split_first() else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "command is empty",
+            ));
+        };
         self.reap_children();
         let workspace = self.active_workspace;
-        let program = std::env::var_os("VILLAIN_TERMINAL").unwrap_or_else(|| "kitty".into());
-        match Command::new(&program)
-            .env("WAYLAND_DISPLAY", &self.socket_name)
-            .env_remove("WAYLAND_SOCKET")
+        let mut command = Command::new(program);
+        command
+            .args(arguments)
+            .envs(&self.config.environment)
             // A shell started from a desktop terminal can inherit the host's
             // X11 display and a forced GTK backend. Neither describes the
             // session that Villain is providing to this child.
             .env_remove("DISPLAY")
-            .env_remove("GDK_BACKEND")
-            .spawn()
-        {
-            Ok(child) => {
-                tracing::info!(
-                    pid = child.id(),
-                    workspace = workspace + 1,
-                    "terminal launched"
-                );
-                self.children.push((workspace, child));
-            }
-            Err(error) => tracing::error!(?program, %error, "terminal launch failed"),
+            .env_remove("WAYLAND_SOCKET")
+            .env("WAYLAND_DISPLAY", &self.socket_name);
+        if let Some(display) = self.xwayland_display {
+            command.env("DISPLAY", format!(":{display}"));
         }
+        let child = command.spawn()?;
+        tracing::info!(
+            pid = child.id(),
+            workspace = workspace + 1,
+            ?argv,
+            "application launched"
+        );
+        self.children.push((workspace, child));
+        Ok(())
     }
     pub fn reap_children(&mut self) {
         self.children
@@ -91,14 +107,68 @@ impl Villain {
                 }
             });
     }
-    fn configure_window(window: &Window, size: Size<i32, smithay::utils::Logical>) {
-        let surface = window.toplevel().unwrap();
-        surface.with_pending_state(|pending| {
-            pending.size = Some(size);
-            pending.states.unset(xdg_toplevel::State::Fullscreen);
-        });
-        surface.send_pending_configure();
+    fn configure_window(
+        window: &Window,
+        location: Point<i32, smithay::utils::Logical>,
+        size: Size<i32, smithay::utils::Logical>,
+    ) {
+        if let Some(surface) = window.toplevel() {
+            surface.with_pending_state(|pending| {
+                pending.size = Some(size);
+                pending.states.unset(xdg_toplevel::State::Fullscreen);
+            });
+            surface.send_pending_configure();
+        } else if let Some(surface) = window.x11_surface()
+            && let Err(error) = surface.configure(Rectangle::new(location, size))
+        {
+            tracing::warn!(%error, window = surface.window_id(), "could not tile X11 window");
+        }
     }
+
+    fn send_pending_configure(window: &Window) {
+        if let Some(surface) = window.toplevel() {
+            surface.send_pending_configure();
+        }
+    }
+
+    /// Update a window's activation state and notify the client only when the
+    /// state actually changed. Sending an activation configure for every
+    /// window during every relayout creates a burst of competing configure
+    /// serials while the workspace is being switched.
+    fn set_activated(window: &Window, activated: bool) {
+        if window.set_activated(activated) {
+            Self::send_pending_configure(window);
+        }
+    }
+
+    fn window_surface(
+        window: &Window,
+    ) -> Option<smithay::reexports::wayland_server::protocol::wl_surface::WlSurface> {
+        window.wl_surface().map(|surface| surface.into_owned())
+    }
+
+    fn workspace_for_pid(&self, pid: Option<u32>) -> usize {
+        self.children
+            .iter()
+            .find(|(_, child)| Some(child.id()) == pid)
+            .map(|(index, _)| *index)
+            .unwrap_or(self.active_workspace)
+    }
+
+    fn add_workspace_window(&mut self, index: usize, window: Window) {
+        let id = WindowId(self.next_window_id);
+        self.next_window_id += 1;
+        self.workspaces[index].windows.push(WorkspaceWindow {
+            id,
+            window,
+            minimized: false,
+        });
+        tracing::info!(window = id.0, workspace = index + 1, "window opened");
+        if index == self.active_workspace {
+            self.relayout_active_workspace();
+        }
+    }
+
     pub fn add_window(&mut self, surface: ToplevelSurface) {
         // Associate a direct child with its launch workspace even after switching.
         let pid = surface
@@ -106,38 +176,41 @@ impl Villain {
             .client()
             .and_then(|client| client.get_credentials(&self.display_handle).ok())
             .map(|credentials| credentials.pid as u32);
-        let index = self
-            .children
-            .iter()
-            .find(|(_, child)| Some(child.id()) == pid)
-            .map(|(index, _)| *index)
-            .unwrap_or(self.active_workspace);
-        let window = Window::new_wayland_window(surface);
-        self.workspaces[index].windows.push(WorkspaceWindow {
-            window,
-            minimized: false,
-        });
-        if index == self.active_workspace {
-            self.relayout_active_workspace();
+        let index = self.workspace_for_pid(pid);
+        self.add_workspace_window(index, Window::new_wayland_window(surface));
+    }
+
+    pub fn add_x11_window(&mut self, surface: X11Surface) {
+        if self.window_for_x11_surface(&surface).is_some() {
+            return;
         }
+        let index = self.workspace_for_pid(surface.get_client_pid().ok());
+        self.add_workspace_window(index, Window::new_x11_window(surface));
     }
     pub fn switch_workspace(&mut self, index: usize) {
         if index >= self.workspaces.len() {
             return;
         }
         self.release_pointer_buttons();
-        let old: Vec<_> = self.space.elements().cloned().collect();
+        let old: Vec<_> = self
+            .workspaces
+            .iter()
+            .flat_map(|workspace| workspace.windows.iter().map(|entry| entry.window.clone()))
+            .collect();
         for window in old {
             self.space.unmap_elem(&window);
-            window.set_activated(false);
-            window.toplevel().unwrap().send_pending_configure();
+            Self::set_activated(&window, false);
         }
         self.active_workspace = index;
         self.relayout_active_workspace();
     }
 
     pub fn relayout_active_workspace(&mut self) {
-        let old: Vec<_> = self.space.elements().cloned().collect();
+        let old: Vec<_> = self
+            .workspaces
+            .iter()
+            .flat_map(|workspace| workspace.windows.iter().map(|entry| entry.window.clone()))
+            .collect();
         for window in old {
             self.space.unmap_elem(&window);
         }
@@ -153,38 +226,90 @@ impl Villain {
             .into_iter()
             .zip(master_stack_layout(self.output_size, visible_count))
         {
-            Self::configure_window(&window, size);
+            Self::configure_window(&window, location, size);
             self.space.map_element(window, location, false);
         }
         self.refresh_pointer(0);
+
+        // A workspace switch or a newly-created window can happen while the
+        // pointer is outside the compositor's current hit-test target. Keep
+        // the seat usable in that case by assigning keyboard focus to the
+        // first visible window instead of leaving focus on an unmapped surface.
+        if self.host_focused && self.keyboard.current_focus().is_none() {
+            if let Some(window) = self.workspaces[self.active_workspace]
+                .windows
+                .iter()
+                .find(|entry| !entry.minimized)
+                .map(|entry| entry.window.clone())
+            {
+                if let Some(surface) = Self::window_surface(&window) {
+                    Self::set_activated(&window, true);
+                    self.keyboard.clone().set_focus(
+                        self,
+                        Some(surface),
+                        SERIAL_COUNTER.next_serial(),
+                    );
+                }
+            }
+        }
     }
 
-    pub fn close_focused_window(&mut self) {
+    pub fn close_focused_window(&mut self) -> bool {
         if let Some(window) = self.focused_window() {
-            window.toplevel().unwrap().send_close();
+            self.apply_window_action(&window, WindowAction::Close);
+            true
+        } else {
+            false
         }
     }
 
-    pub fn minimize_focused_window(&mut self) {
-        let Some(focused) = self.focused_window() else {
-            return;
-        };
-        let workspace = &mut self.workspaces[self.active_workspace];
-        if let Some(entry) = workspace
-            .windows
-            .iter_mut()
-            .find(|entry| entry.window == focused && !entry.minimized)
-        {
-            entry.minimized = true;
-            workspace
-                .minimized_history
-                .retain(|window| window != &focused);
-            workspace.minimized_history.push(focused);
-            self.relayout_active_workspace();
+    pub fn minimize_focused_window(&mut self) -> bool {
+        if let Some(window) = self.focused_window() {
+            self.apply_window_action(&window, WindowAction::Minimize);
+            true
+        } else {
+            false
         }
     }
 
-    pub fn restore_last_minimized_window(&mut self) {
+    pub fn apply_window_action(&mut self, window: &Window, action: WindowAction) {
+        match action {
+            WindowAction::Close => {
+                if let Some(surface) = window.toplevel() {
+                    surface.send_close();
+                } else if let Some(surface) = window.x11_surface()
+                    && let Err(error) = surface.close()
+                {
+                    tracing::warn!(%error, window = surface.window_id(), "could not close X11 window");
+                }
+            }
+            WindowAction::Minimize => {
+                let mut changed_active_workspace = false;
+                for (index, workspace) in self.workspaces.iter_mut().enumerate() {
+                    let Some(entry) = workspace
+                        .windows
+                        .iter_mut()
+                        .find(|entry| entry.window == *window && !entry.minimized)
+                    else {
+                        continue;
+                    };
+                    entry.minimized = true;
+                    let window = entry.window.clone();
+                    workspace
+                        .minimized_history
+                        .retain(|candidate| candidate != &window);
+                    workspace.minimized_history.push(window);
+                    changed_active_workspace = index == self.active_workspace;
+                    break;
+                }
+                if changed_active_workspace {
+                    self.relayout_active_workspace();
+                }
+            }
+        }
+    }
+
+    pub fn restore_last_minimized_window(&mut self) -> bool {
         let workspace = &mut self.workspaces[self.active_workspace];
         while let Some(window) = workspace.minimized_history.pop() {
             if let Some(entry) = workspace
@@ -194,9 +319,134 @@ impl Villain {
             {
                 entry.minimized = false;
                 self.relayout_active_workspace();
-                return;
+                return true;
             }
         }
+        false
+    }
+
+    /// Returns `None` for an unknown ID and `Some(false)` for a minimized one.
+    pub fn focus_window(&mut self, id: WindowId) -> Option<bool> {
+        let (workspace, minimized, surface) =
+            self.workspaces
+                .iter()
+                .enumerate()
+                .find_map(|(workspace, state)| {
+                    state
+                        .windows
+                        .iter()
+                        .find(|entry| entry.id == id)
+                        .map(|entry| {
+                            (
+                                workspace,
+                                entry.minimized,
+                                Self::window_surface(&entry.window),
+                            )
+                        })
+                })?;
+        if minimized {
+            return Some(false);
+        }
+        if workspace != self.active_workspace {
+            self.switch_workspace(workspace);
+        }
+        let Some(surface) = surface else {
+            return Some(false);
+        };
+        for entry in &self.workspaces[self.active_workspace].windows {
+            let activated = entry.id == id;
+            Self::set_activated(&entry.window, activated);
+        }
+        let keyboard = self.keyboard.clone();
+        keyboard.set_focus(self, Some(surface), SERIAL_COUNTER.next_serial());
+        Some(true)
+    }
+
+    pub fn restore_window(&mut self, id: WindowId) -> bool {
+        for (workspace_index, workspace) in self.workspaces.iter_mut().enumerate() {
+            let Some(entry) = workspace.windows.iter_mut().find(|entry| entry.id == id) else {
+                continue;
+            };
+            if entry.minimized {
+                entry.minimized = false;
+                let window = entry.window.clone();
+                workspace
+                    .minimized_history
+                    .retain(|candidate| candidate != &window);
+                if workspace_index == self.active_workspace {
+                    self.relayout_active_workspace();
+                }
+            }
+            return true;
+        }
+        false
+    }
+
+    pub fn window_info(&self) -> Vec<WindowInfo> {
+        let focused = self.keyboard.current_focus();
+        self.workspaces
+            .iter()
+            .enumerate()
+            .flat_map(|(workspace, state)| {
+                let focused = focused.clone();
+                state.windows.iter().map(move |entry| {
+                    let (title, app_id, wl_surface) = if let Some(surface) = entry.window.toplevel()
+                    {
+                        let (title, app_id) = smithay::wayland::compositor::with_states(
+                            surface.wl_surface(),
+                            |states| {
+                                let attributes = states
+                                    .data_map
+                                    .get::<smithay::wayland::shell::xdg::XdgToplevelSurfaceData>()
+                                    .expect("XDG toplevel data")
+                                    .lock()
+                                    .unwrap();
+                                (
+                                    attributes.title.clone().unwrap_or_default(),
+                                    attributes.app_id.clone().unwrap_or_default(),
+                                )
+                            },
+                        );
+                        (title, app_id, Some(surface.wl_surface().clone()))
+                    } else if let Some(surface) = entry.window.x11_surface() {
+                        (surface.title(), surface.class(), surface.wl_surface())
+                    } else {
+                        (String::new(), String::new(), None)
+                    };
+                    WindowInfo {
+                        id: entry.id,
+                        title,
+                        app_id,
+                        workspace: workspace + 1,
+                        minimized: entry.minimized,
+                        focused: focused
+                            .as_ref()
+                            .is_some_and(|focused| wl_surface.as_ref() == Some(focused)),
+                    }
+                })
+            })
+            .collect()
+    }
+
+    pub fn workspace_info(&self) -> Vec<WorkspaceInfo> {
+        self.workspaces
+            .iter()
+            .enumerate()
+            .map(|(index, workspace)| WorkspaceInfo {
+                workspace: index + 1,
+                active: index == self.active_workspace,
+                window_count: workspace.windows.len(),
+                visible_window_count: workspace
+                    .windows
+                    .iter()
+                    .filter(|entry| !entry.minimized)
+                    .count(),
+            })
+            .collect()
+    }
+
+    pub fn active_window_info(&self) -> Option<WindowInfo> {
+        self.window_info().into_iter().find(|window| window.focused)
     }
 
     fn focused_window(&self) -> Option<Window> {
@@ -204,7 +454,15 @@ impl Villain {
         self.workspaces[self.active_workspace]
             .windows
             .iter()
-            .find(|entry| entry.window.toplevel().unwrap().wl_surface() == &focused)
+            .find(|entry| Self::window_surface(&entry.window).as_ref() == Some(&focused))
+            .map(|entry| entry.window.clone())
+    }
+
+    fn window_for_toplevel(&self, surface: &ToplevelSurface) -> Option<Window> {
+        self.workspaces
+            .iter()
+            .flat_map(|workspace| &workspace.windows)
+            .find(|entry| entry.window.toplevel() == Some(surface))
             .map(|entry| entry.window.clone())
     }
 
@@ -215,8 +473,24 @@ impl Villain {
         self.workspaces
             .iter()
             .flat_map(|workspace| &workspace.windows)
-            .find(|entry| entry.window.toplevel().unwrap().wl_surface() == surface)
+            .find(|entry| Self::window_surface(&entry.window).as_ref() == Some(surface))
             .map(|entry| entry.window.clone())
+            .or_else(|| {
+                self.unmanaged_x11_windows
+                    .iter()
+                    .find(|window| Self::window_surface(window).as_ref() == Some(surface))
+                    .cloned()
+            })
+    }
+
+    pub fn window_for_x11_surface(&self, surface: &X11Surface) -> Option<Window> {
+        self.workspaces
+            .iter()
+            .flat_map(|workspace| &workspace.windows)
+            .map(|entry| &entry.window)
+            .chain(self.unmanaged_x11_windows.iter())
+            .find(|window| window.x11_surface() == Some(surface))
+            .cloned()
     }
 
     pub fn focus_window_at_pointer(&mut self) {
@@ -227,14 +501,13 @@ impl Villain {
         let keyboard_surface = hit
             .as_ref()
             .filter(|_| self.host_focused)
-            .map(|(window, _)| window.toplevel().unwrap().wl_surface().clone());
+            .and_then(|(window, _)| Self::window_surface(window));
         if self.keyboard.current_focus() != keyboard_surface {
             for entry in &self.workspaces[self.active_workspace].windows {
                 let activated = keyboard_surface.as_ref().is_some_and(|surface| {
-                    entry.window.toplevel().unwrap().wl_surface() == surface
+                    Self::window_surface(&entry.window).as_ref() == Some(surface)
                 });
-                entry.window.set_activated(activated);
-                entry.window.toplevel().unwrap().send_pending_configure();
+                Self::set_activated(&entry.window, activated);
             }
             let keyboard = self.keyboard.clone();
             keyboard.set_focus(self, keyboard_surface, SERIAL_COUNTER.next_serial());
@@ -258,6 +531,12 @@ impl Villain {
         pointer.frame(self);
     }
     pub fn refresh_pointer(&mut self, time: u32) {
+        self.request_repaint();
+        self.refresh_pointer_surface(time);
+        self.focus_window_at_pointer();
+    }
+
+    pub fn refresh_pointer_surface(&mut self, time: u32) {
         let hit = self
             .space
             .element_under(self.pointer_location)
@@ -285,14 +564,32 @@ impl Villain {
             },
         );
         pointer.frame(self);
-        self.focus_window_at_pointer();
     }
 
     pub fn remove_window(&mut self, surface: &ToplevelSurface) {
+        if let Some(window) = self.window_for_toplevel(surface) {
+            self.remove_managed_window(&window);
+        }
+    }
+
+    pub fn remove_x11_window(&mut self, surface: &X11Surface) {
+        if let Some(window) = self.window_for_x11_surface(surface) {
+            if surface.is_override_redirect() {
+                self.space.unmap_elem(&window);
+                self.unmanaged_x11_windows
+                    .retain(|candidate| candidate != &window);
+                self.request_repaint();
+            } else {
+                self.remove_managed_window(&window);
+            }
+        }
+    }
+
+    fn remove_managed_window(&mut self, target: &Window) {
         for workspace in &mut self.workspaces {
             let removed: Vec<_> = workspace
                 .windows
-                .extract_if(.., |entry| entry.window.toplevel() == Some(surface))
+                .extract_if(.., |entry| &entry.window == target)
                 .map(|entry| entry.window)
                 .collect();
             for window in removed {

@@ -26,11 +26,16 @@ use smithay::{
         data_device::{
             ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
         },
+        ext_data_control,
+        primary_selection::{PrimarySelectionHandler, PrimarySelectionState},
+        wlr_data_control,
     },
+    xwayland::XWaylandClientData,
 };
 use std::os::fd::OwnedFd;
 
 use crate::state::{ClientState, Villain};
+use crate::workspaces::WindowAction;
 
 impl CompositorHandler for Villain {
     fn compositor_state(&mut self) -> &mut CompositorState {
@@ -38,13 +43,31 @@ impl CompositorHandler for Villain {
     }
 
     fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
-        &client.get_data::<ClientState>().unwrap().compositor_state
+        if let Some(state) = client.get_data::<ClientState>() {
+            &state.compositor_state
+        } else if let Some(state) = client.get_data::<XWaylandClientData>() {
+            &state.compositor_state
+        } else {
+            unreachable!("Wayland client has no compositor state")
+        }
     }
 
     fn commit(&mut self, surface: &WlSurface) {
         // This turns a client's wl_buffer commit into the state Smithay's
         // renderer can later inspect.
         on_commit_buffer_handler::<Self>(surface);
+
+        let root = std::iter::successors(Some(surface.clone()), |surface| {
+            smithay::wayland::compositor::get_parent(surface)
+        })
+        .last()
+        .unwrap();
+        let visible_window = self
+            .window_for_surface(&root)
+            .is_some_and(|window| self.space.element_location(&window).is_some());
+        if visible_window || self.cursor.uses_surface(&root) {
+            self.request_repaint();
+        }
 
         // The first commit is the handshake: we tell the client which state
         // the compositor accepts, then the client can commit its first buffer.
@@ -54,20 +77,24 @@ impl CompositorHandler for Villain {
             // on each output.
             window.on_commit();
 
-            let initial_configure_sent = with_states(surface, |states| {
-                states
-                    .data_map
-                    .get::<XdgToplevelSurfaceData>()
-                    .expect("XDG toplevel data")
-                    .lock()
-                    .unwrap()
-                    .initial_configure_sent
-            });
+            if let Some(toplevel) = window.toplevel() {
+                let initial_configure_sent = with_states(surface, |states| {
+                    states
+                        .data_map
+                        .get::<XdgToplevelSurfaceData>()
+                        .expect("XDG toplevel data")
+                        .lock()
+                        .unwrap()
+                        .initial_configure_sent
+                });
 
-            if !initial_configure_sent {
-                window.toplevel().unwrap().send_configure();
+                if !initial_configure_sent {
+                    toplevel.send_configure();
+                }
             }
-            self.refresh_pointer(0);
+            // A repaint can change the pointer's surface-local coordinates,
+            // but it must not override focus chosen by a dispatcher.
+            self.refresh_pointer_surface(0);
         }
     }
 }
@@ -84,11 +111,60 @@ impl ShmHandler for Villain {
 
 impl SelectionHandler for Villain {
     type SelectionUserData = ();
+
+    fn new_selection(
+        &mut self,
+        selection: smithay::wayland::selection::SelectionTarget,
+        source: Option<smithay::wayland::selection::SelectionSource>,
+        _seat: Seat<Self>,
+    ) {
+        let Some(xwm) = self.xwm.as_mut() else {
+            return;
+        };
+        let mime_types = source.map(|source| source.mime_types());
+        if let Err(error) = xwm.new_selection(selection, mime_types) {
+            tracing::warn!(%error, ?selection, "could not export Wayland selection to XWayland");
+        }
+    }
+
+    fn send_selection(
+        &mut self,
+        selection: smithay::wayland::selection::SelectionTarget,
+        mime_type: String,
+        fd: OwnedFd,
+        _seat: Seat<Self>,
+        _user_data: &Self::SelectionUserData,
+    ) {
+        let Some(xwm) = self.xwm.as_mut() else {
+            return;
+        };
+        if let Err(error) = xwm.send_selection(selection, mime_type, fd, self.loop_handle.clone()) {
+            tracing::warn!(%error, ?selection, "could not transfer XWayland selection");
+        }
+    }
 }
 
 impl DataDeviceHandler for Villain {
     fn data_device_state(&self) -> &DataDeviceState {
         &self.data_device_state
+    }
+}
+
+impl PrimarySelectionHandler for Villain {
+    fn primary_selection_state(&self) -> &PrimarySelectionState {
+        &self.primary_selection_state
+    }
+}
+
+impl wlr_data_control::DataControlHandler for Villain {
+    fn data_control_state(&self) -> &wlr_data_control::DataControlState {
+        &self.wlr_data_control_state
+    }
+}
+
+impl ext_data_control::DataControlHandler for Villain {
+    fn data_control_state(&self) -> &ext_data_control::DataControlState {
+        &self.ext_data_control_state
     }
 }
 
@@ -114,6 +190,12 @@ impl XdgShellHandler for Villain {
         self.remove_window(&surface);
     }
 
+    fn minimize_request(&mut self, surface: ToplevelSurface) {
+        if let Some(window) = self.window_for_surface(surface.wl_surface()) {
+            self.apply_window_action(&window, WindowAction::Minimize);
+        }
+    }
+
     fn new_popup(&mut self, _surface: PopupSurface, _positioner: PositionerState) {}
 
     fn reposition_request(
@@ -131,8 +213,12 @@ impl XdgShellHandler for Villain {
 // above. It is intentionally at the bottom: the implementations are easier to
 // find before the generated dispatch glue.
 smithay::delegate_compositor!(Villain);
+smithay::delegate_cursor_shape!(Villain);
 smithay::delegate_data_device!(Villain);
+smithay::delegate_data_control!(Villain);
+smithay::delegate_ext_data_control!(Villain);
 smithay::delegate_output!(Villain);
+smithay::delegate_primary_selection!(Villain);
 smithay::delegate_seat!(Villain);
 smithay::delegate_shm!(Villain);
 smithay::delegate_xdg_shell!(Villain);

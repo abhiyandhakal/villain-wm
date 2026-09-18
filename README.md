@@ -257,11 +257,87 @@ The temporary mod key is `Alt` while Villain is being tested.
 
 Keyboard focus follows the pointer across visible windows.
 
+Villain renders its own cursor in both nested and direct modes. It follows
+client-provided cursor surfaces and the standard cursor-shape protocol, loading
+named shapes from `XCURSOR_THEME` at `XCURSOR_SIZE` when those variables are
+set. The host compositor's cursor is hidden while it is over the nested output.
+
+Clipboard state is local to Villain, including when it runs nested inside
+another compositor. Standard clipboard, primary selection, and data-control
+protocols are available so ordinary applications and clipboard managers can
+exchange selections without leaking them into the host session.
+
+Villain starts XWayland as an optional compatibility subsystem. X11 windows
+use the same workspace, layout, focus, close, and minimize model as native
+Wayland windows, while override-redirect surfaces remain unmanaged. Clipboard
+and primary selections are bridged in both directions. `DISPLAY` is only
+exported after XWayland reports that it is ready; native Wayland operation
+continues if XWayland is unavailable.
+
+### Configuration
+
+Villain loads `~/.config/villain/config.toml` at startup. The built-in defaults
+use Super as `MOD`, enable touchpad tapping and natural scrolling, and preserve
+the existing close, minimize, terminal, and workspace bindings. See
+`config.example.toml` for the complete format.
+
+Session variables come from `~/.config/villain/environment` by default, or the
+file selected by `environment_file`. It accepts literal `KEY=VALUE` and
+`export KEY=VALUE` lines; it does not execute shell syntax or expand `$HOME`.
+Villain supplies Wayland-native defaults for XDG, Electron, Mozilla, Qt, and
+GTK applications. These values are inherited by applications spawned after a
+reload, including descendants of a newly opened terminal.
+
+Configuration reload is atomic:
+
+```console
+villainctl reload
+```
+
+Villain parses and validates the entire replacement before changing runtime
+state. A successful reload replaces the keybind registry, reapplies touchpad
+settings to connected devices, and updates the environment for future spawned
+applications. Existing application processes retain their original environment.
+
+On the direct TTY backend, Villain publishes its display and desktop variables
+to the systemd user manager and D-Bus activation environment. This lets
+`xdg-desktop-portal` and its GTK backend connect to the Villain session. The
+shipped `share/xdg-desktop-portal/villain-portals.conf` selects GTK for the
+generic portals it implements, including file choosers, notifications,
+printing, and settings. Packaged builds should install that file below their
+matching `share` prefix. Nested development mode deliberately leaves the host
+desktop's activation environment alone.
+
+Screen capture is a separate portal backend concern. Villain does not claim
+Hyprland's portal backend: screenshot, screencast, remote-desktop, and global
+shortcut portals remain unavailable until Villain provides the corresponding
+capture protocols and backend.
+
+If `config.toml` contains any `[[bind]]` entries, they replace the complete
+default binding set. `MOD` follows `modkey`; explicit `ALT`, `SUPER`, `CTRL`,
+and `SHIFT` modifiers remain available.
+
 ---
 
 ## Architecture
 
 Villain conceptually separates compositor mechanism from window-management policy.
+
+Keyboard shortcuts and external clients share one imperative dispatcher. IPC
+queries inspect state directly; they are not dispatcher actions.
+
+```text
+keyboard -> keybind matching --+
+                              +-> dispatcher -> compositor state
+villainctl -> IPC dispatch ---+
+villainctl -> IPC query ----------------------> compositor state
+```
+
+The Cargo workspace currently contains three packages:
+
+* `villain` — the compositor, dispatcher, window state, and IPC server
+* `villain-ipc` — Smithay-independent serializable types and client code
+* `villainctl` — a thin command-line IPC client
 
 ```text
 Wayland clients
@@ -340,7 +416,40 @@ Conceptually:
 
 Shell surfaces such as panels, launchers, and overlays are not normal application windows and should not participate in ordinary tiling layouts.
 
-Villain and `abhishell` may eventually use a private protocol or IPC interface for functionality that cannot appropriately be exposed to arbitrary Wayland clients.
+Villain exposes its window-management state and actions to `abhishell` through
+the IPC interface below. Wayland protocols remain the interface for ordinary
+client and shell-surface behavior.
+
+### IPC and `villainctl`
+
+Villain listens on a user-only Unix socket scoped to its Wayland display:
+
+```text
+$XDG_RUNTIME_DIR/villain-$WAYLAND_DISPLAY.sock
+```
+
+Requests and responses are JSON Lines. Workspace numbers at the IPC boundary
+are one-based. Window IDs are monotonic for the lifetime of the compositor and
+are not reused.
+
+Initial commands include:
+
+```console
+villainctl dispatch workspace 2
+villainctl dispatch minimize
+villainctl dispatch focus-window 1
+villainctl dispatch restore-window 1
+villainctl dispatch exec kitty
+
+villainctl windows
+villainctl workspaces
+villainctl active-window
+villainctl active-workspace
+villainctl version
+```
+
+`villainctl` discovers the compositor through `WAYLAND_DISPLAY`. Set
+`VILLAIN_SOCKET` only when an explicit socket override is needed.
 
 ---
 

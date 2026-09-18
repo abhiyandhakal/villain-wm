@@ -5,7 +5,13 @@ edition = "2024"
 description = "A tiling-first Wayland compositor and window manager for the Abhi Desktop Environment"
 license = "MIT"
 
+[workspace]
+members = ["crates/villain-ipc", "crates/villainctl"]
+resolver = "3"
+
 [dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
 smithay = { version = "0.7.0", default-features = false, features = [
     "backend_winit",
     "backend_drm",
@@ -15,6 +21,10 @@ smithay = { version = "0.7.0", default-features = false, features = [
     "backend_session_libseat",
     "desktop",
     "wayland_frontend",
+    "xwayland",
 ] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+xcursor = "0.3.11"
+villain-ipc = { path = "crates/villain-ipc" }
+serde_json = "1"
