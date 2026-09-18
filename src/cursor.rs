@@ -126,6 +126,24 @@ impl CursorState {
             });
         }
     }
+
+    pub fn uses_surface(
+        &self,
+        surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+    ) -> bool {
+        matches!(&self.image, CursorImageStatus::Surface(cursor) if cursor == surface)
+    }
+
+    pub fn next_animation_delay(&self, now: Duration) -> Option<Duration> {
+        let CursorImageStatus::Named(icon) = &self.image else {
+            return None;
+        };
+        let frames = self.named.get(icon)?;
+        if frames.len() < 2 {
+            return None;
+        }
+        frame_delay_at(frames, now.saturating_sub(self.image_since))
+    }
 }
 
 fn load_named_cursor(
@@ -188,6 +206,21 @@ fn frame_at(frames: &[CursorFrame], elapsed: Duration) -> Option<&CursorFrame> {
     })
 }
 
+fn frame_delay_at(frames: &[CursorFrame], elapsed: Duration) -> Option<Duration> {
+    let total: Duration = frames.iter().map(|frame| frame.delay).sum();
+    if total.is_zero() {
+        return None;
+    }
+    let mut offset = Duration::from_nanos((elapsed.as_nanos() % total.as_nanos()) as u64);
+    for frame in frames {
+        if offset < frame.delay {
+            return Some(frame.delay - offset);
+        }
+        offset -= frame.delay;
+    }
+    None
+}
+
 fn fallback_cursor() -> CursorFrame {
     const WIDTH: usize = 16;
     const HEIGHT: usize = 24;
@@ -236,5 +269,13 @@ mod tests {
             frame_at(&frames, Duration::from_millis(2)).unwrap(),
             &frames[0]
         ));
+        assert_eq!(
+            frame_delay_at(&frames, Duration::ZERO),
+            Some(Duration::from_millis(1))
+        );
+        assert_eq!(
+            frame_delay_at(&frames, Duration::from_micros(1500)),
+            Some(Duration::from_micros(500))
+        );
     }
 }

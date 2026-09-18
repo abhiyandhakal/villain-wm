@@ -39,7 +39,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "selected backend"
     );
     // Parse options before creating sockets so --help works without a session.
-    let mut event_loop: EventLoop<Villain> = EventLoop::try_new()?;
+    let mut event_loop: EventLoop<'static, Villain> = EventLoop::try_new()?;
     let display = Display::new()?;
     let config = config::RuntimeConfig::load()?;
     let mut state = Villain::new(&mut event_loop, display, config);
@@ -50,15 +50,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     tracing::info!(socket = ?state.socket_name, "Villain is ready");
-    event_loop.run(
-        Some(std::time::Duration::from_millis(16)),
-        &mut state,
-        |state| {
-            state.reap_children();
-            state.space.refresh();
-            let _ = state.display_handle.flush_clients();
-        },
-    )?;
+    state.render_if_needed();
+    event_loop.run(None, &mut state, |state| {
+        state.reap_children();
+        state.space.refresh();
+        let _ = state.display_handle.flush_clients();
+        state.render_if_needed();
+    })?;
 
     Ok(())
 }

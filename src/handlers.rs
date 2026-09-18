@@ -50,6 +50,18 @@ impl CompositorHandler for Villain {
         // renderer can later inspect.
         on_commit_buffer_handler::<Self>(surface);
 
+        let root = std::iter::successors(Some(surface.clone()), |surface| {
+            smithay::wayland::compositor::get_parent(surface)
+        })
+        .last()
+        .unwrap();
+        let visible_window = self
+            .window_for_surface(&root)
+            .is_some_and(|window| self.space.element_location(&window).is_some());
+        if visible_window || self.cursor.uses_surface(&root) {
+            self.request_repaint();
+        }
+
         // The first commit is the handshake: we tell the client which state
         // the compositor accepts, then the client can commit its first buffer.
         if let Some(window) = self.window_for_surface(surface) {

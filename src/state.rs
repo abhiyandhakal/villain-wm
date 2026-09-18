@@ -6,7 +6,11 @@ use smithay::{
     desktop::{Space, Window},
     input::{SeatHandler, SeatState, keyboard::KeyboardHandle},
     reexports::{
-        calloop::{EventLoop, Interest, LoopSignal, Mode, PostAction, generic::Generic},
+        calloop::{
+            EventLoop, Interest, LoopHandle, LoopSignal, Mode, PostAction,
+            generic::Generic,
+            timer::{TimeoutAction, Timer},
+        },
         wayland_protocols::xdg::shell::server::xdg_toplevel,
         wayland_server::{
             Display, DisplayHandle, Resource,
@@ -40,6 +44,7 @@ use crate::workspaces::Workspace;
 /// `Arc<Mutex<_>>` for its own state.
 pub struct Villain {
     pub tty: Option<crate::tty::Tty>,
+    pub winit: Option<crate::render::Winit>,
     pub dmabuf_state: smithay::wayland::dmabuf::DmabufState,
     pub display_handle: DisplayHandle,
     pub socket_name: OsString,
@@ -80,11 +85,14 @@ pub struct Villain {
     pub suppressed_keys: std::collections::HashSet<smithay::input::keyboard::Keycode>,
     pub host_focused: bool,
     pub pressed_buttons: std::collections::HashSet<u32>,
+    pub repaint_needed: bool,
+    cursor_timer_generation: u64,
+    loop_handle: LoopHandle<'static, Self>,
 }
 
 impl Villain {
     pub fn new(
-        event_loop: &mut EventLoop<Self>,
+        event_loop: &mut EventLoop<'static, Self>,
         display: Display<Self>,
         config: RuntimeConfig,
     ) -> Self {
@@ -115,6 +123,7 @@ impl Villain {
 
         Self {
             tty: None,
+            winit: None,
             dmabuf_state: smithay::wayland::dmabuf::DmabufState::new(),
             display_handle: display_handle.clone(),
             socket_name,
@@ -150,6 +159,46 @@ impl Villain {
             suppressed_keys: Default::default(),
             host_focused: true,
             pressed_buttons: Default::default(),
+            repaint_needed: true,
+            cursor_timer_generation: 0,
+            loop_handle: event_loop.handle(),
+        }
+    }
+
+    pub fn request_repaint(&mut self) {
+        self.repaint_needed = true;
+    }
+
+    /// Schedule exactly one future wake-up for an animated server cursor.
+    /// Incrementing the generation makes older one-shot timers harmless.
+    pub fn schedule_cursor_frame(&mut self, delay: Option<std::time::Duration>) {
+        self.cursor_timer_generation = self.cursor_timer_generation.wrapping_add(1);
+        let generation = self.cursor_timer_generation;
+        let Some(delay) = delay else {
+            return;
+        };
+        let result =
+            self.loop_handle
+                .insert_source(Timer::from_duration(delay), move |_, _, state| {
+                    if state.cursor_timer_generation == generation {
+                        state.request_repaint();
+                    }
+                    TimeoutAction::Drop
+                });
+        if let Err(error) = result {
+            tracing::warn!(%error, "could not schedule cursor animation frame");
+        }
+    }
+
+    /// Called after each batch of input, Wayland, IPC, DRM, or timer events.
+    pub fn render_if_needed(&mut self) {
+        if !self.repaint_needed {
+            return;
+        }
+        if self.tty.is_some() {
+            crate::tty::render_if_needed(self);
+        } else if let Some(winit) = self.winit.as_mut() {
+            winit.request_redraw();
         }
     }
 }
@@ -169,6 +218,7 @@ impl SeatHandler for Villain {
         image: smithay::input::pointer::CursorImageStatus,
     ) {
         self.cursor.set_image(image, self.start_time.elapsed());
+        self.request_repaint();
     }
 
     fn focus_changed(

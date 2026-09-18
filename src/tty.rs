@@ -22,10 +22,7 @@ use smithay::{
     input::pointer::{AxisFrame, ButtonEvent},
     output::{Mode, Output, PhysicalProperties, Subpixel},
     reexports::{
-        calloop::{
-            EventLoop,
-            timer::{TimeoutAction, Timer},
-        },
+        calloop::EventLoop,
         drm::control::{Device, ModeTypeFlags, connector},
         input::Libinput,
         rustix::fs::OFlags,
@@ -185,6 +182,7 @@ pub fn init(
                         tracing::warn!(%error, "DRM event failed; scheduling a fresh frame");
                         tty.pending = false;
                         tty.surface.reset_buffers();
+                        state.request_repaint();
                     }
                 }
             }
@@ -243,28 +241,9 @@ pub fn init(
                 tty.damage = OutputDamageTracker::from_output(&tty.output);
                 state.host_focused = true;
                 state.refresh_pointer(0);
+                state.request_repaint();
                 tracing::info!("TTY session resumed");
             }
-        })?;
-    event_loop
-        .handle()
-        .insert_source(Timer::immediate(), |_, _, state| {
-            let mut retry_delay = Duration::from_millis(8);
-            if let Some(mut tty) = state.tty.take() {
-                if tty.active
-                    && !tty.pending
-                    && let Err(error) = tty.render(state)
-                {
-                    // The first frame after regaining DRM master can race the
-                    // kernel handoff. Discard stale buffers and retry.
-                    tracing::warn!(%error, "DRM render failed; resetting buffers and retrying");
-                    tty.pending = false;
-                    tty.surface.reset_buffers();
-                    retry_delay = Duration::from_millis(100);
-                }
-                state.tty = Some(tty);
-            }
-            TimeoutAction::ToDuration(retry_delay)
         })?;
     tracing::info!(gpu = %path.display(), ?size, "TTY backend ready; Ctrl+Alt+Backspace exits, Ctrl+Alt+F1–F12 switches VT");
     Ok(())
@@ -272,40 +251,66 @@ pub fn init(
 
 impl Tty {
     fn render(&mut self, state: &mut Villain) -> Result<(), Box<dyn Error>> {
-        let (mut buffer, _age) = self.surface.next_buffer()?;
+        let (mut buffer, age) = self.surface.next_buffer()?;
         let mut framebuffer = self.renderer.bind(&mut buffer)?;
         let now = state.start_time.elapsed();
         let cursor_elements =
             state
                 .cursor
                 .render_elements(&mut self.renderer, state.pointer_location, now);
-        // Repaint the whole buffer for now: no buffer-age optimization yet.
         let result = render_output(
             &self.output,
             &mut self.renderer,
             &mut framebuffer,
             1.0,
-            0,
+            usize::from(age),
             [&state.space],
             &cursor_elements,
             &mut self.damage,
             [0.08, 0.05, 0.12, 1.0],
         )?;
         let sync = result.sync.clone();
+        let damage = result.damage.cloned();
         drop(framebuffer);
-        self.surface.queue_buffer(Some(sync), None, ())?;
-        self.pending = true;
-        for window in state.space.elements() {
-            window.send_frame(
-                &self.output,
-                state.start_time.elapsed(),
-                Some(Duration::ZERO),
-                |_, _| Some(self.output.clone()),
-            );
+        let submitted = if let Some(damage) = damage {
+            self.surface.queue_buffer(Some(sync), Some(damage), ())?;
+            self.pending = true;
+            true
+        } else {
+            false
+        };
+        if submitted {
+            for window in state.space.elements() {
+                window.send_frame(&self.output, now, Some(Duration::ZERO), |_, _| {
+                    Some(self.output.clone())
+                });
+            }
+            state.cursor.send_frame(&self.output, now);
         }
-        state.cursor.send_frame(&self.output, now);
+        let delay = state.cursor.next_animation_delay(now);
+        state.schedule_cursor_frame(delay);
         Ok(())
     }
+}
+
+pub fn render_if_needed(state: &mut Villain) {
+    let Some(mut tty) = state.tty.take() else {
+        return;
+    };
+    if !tty.active || tty.pending {
+        state.tty = Some(tty);
+        return;
+    }
+    state.repaint_needed = false;
+    if let Err(error) = tty.render(state) {
+        // The first frame after regaining DRM master can race the kernel
+        // handoff. Keep the damage pending for the next real event.
+        tracing::warn!(%error, "DRM render failed; resetting buffers");
+        tty.pending = false;
+        tty.surface.reset_buffers();
+        state.repaint_needed = true;
+    }
+    state.tty = Some(tty);
 }
 
 fn process_input(event: InputEvent<LibinputInputBackend>, state: &mut Villain) {

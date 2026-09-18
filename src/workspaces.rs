@@ -421,6 +421,7 @@ impl Villain {
         pointer.frame(self);
     }
     pub fn refresh_pointer(&mut self, time: u32) {
+        self.request_repaint();
         self.refresh_pointer_surface(time);
         self.focus_window_at_pointer();
     }
