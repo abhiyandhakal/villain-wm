@@ -7,6 +7,7 @@ mod backend_selection;
 mod config;
 mod cursor;
 mod dispatch;
+mod focus;
 mod handlers;
 mod ipc;
 mod keybinds;

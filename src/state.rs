@@ -85,7 +85,7 @@ pub struct Villain {
     pub pointer_location: smithay::utils::Point<f64, smithay::utils::Logical>,
     pub cursor: CursorState,
     pub workspaces: [Workspace; 10],
-    pub unmanaged_x11_windows: Vec<Window>,
+    pub unmanaged_x11_windows: Vec<crate::xwayland::UnmanagedWindow>,
     pub active_workspace: usize,
     pub next_window_id: u64,
     pub output_size: smithay::utils::Size<i32, smithay::utils::Logical>,
@@ -218,7 +218,7 @@ impl Villain {
 }
 
 impl SeatHandler for Villain {
-    type KeyboardFocus = smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
+    type KeyboardFocus = crate::focus::KeyboardFocus;
     type PointerFocus = smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
     type TouchFocus = smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 
@@ -240,7 +240,10 @@ impl SeatHandler for Villain {
         seat: &smithay::input::Seat<Self>,
         focused: Option<&Self::KeyboardFocus>,
     ) {
-        let client = focused.and_then(Resource::client);
+        let client = focused.and_then(|focus| {
+            smithay::wayland::seat::WaylandFocus::wl_surface(focus)
+                .and_then(|surface| surface.client())
+        });
         set_data_device_focus(&self.display_handle, seat, client.clone());
         set_primary_focus(&self.display_handle, seat, client);
     }
