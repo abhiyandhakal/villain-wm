@@ -94,13 +94,6 @@ fn activate_in_background(environment: BTreeMap<String, String>, restart_portal:
         "import the Villain D-Bus activation environment",
     );
 
-    run(
-        Command::new("systemctl")
-            .args(["--user", "start", "--no-block", "graphical-session.target"])
-            .envs(&environment),
-        "start the graphical user session target",
-    );
-
     if restart_portal {
         run(
             Command::new("systemctl")

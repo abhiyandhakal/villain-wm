@@ -30,6 +30,7 @@ use smithay::{
         primary_selection::{PrimarySelectionHandler, PrimarySelectionState},
         wlr_data_control,
     },
+    xwayland::XWaylandClientData,
 };
 use std::os::fd::OwnedFd;
 
@@ -42,7 +43,13 @@ impl CompositorHandler for Villain {
     }
 
     fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
-        &client.get_data::<ClientState>().unwrap().compositor_state
+        if let Some(state) = client.get_data::<ClientState>() {
+            &state.compositor_state
+        } else if let Some(state) = client.get_data::<XWaylandClientData>() {
+            &state.compositor_state
+        } else {
+            unreachable!("Wayland client has no compositor state")
+        }
     }
 
     fn commit(&mut self, surface: &WlSurface) {
