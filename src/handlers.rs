@@ -76,6 +76,7 @@ impl CompositorHandler for Villain {
             // surface. Space uses this geometry to decide what gets rendered
             // on each output.
             window.on_commit();
+            self.refresh_window_hints(&window);
 
             if let Some(toplevel) = window.toplevel() {
                 let initial_configure_sent = with_states(surface, |states| {
@@ -188,6 +189,52 @@ impl XdgShellHandler for Villain {
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
         self.remove_window(&surface);
+    }
+
+    fn fullscreen_request(
+        &mut self,
+        surface: ToplevelSurface,
+        output: Option<smithay::reexports::wayland_server::protocol::wl_output::WlOutput>,
+    ) {
+        if let Some(window) = self.window_for_surface(surface.wl_surface()) {
+            surface.with_pending_state(|state| state.fullscreen_output = output);
+            self.set_window_fullscreen(&window, true);
+        }
+    }
+
+    fn unfullscreen_request(&mut self, surface: ToplevelSurface) {
+        if let Some(window) = self.window_for_surface(surface.wl_surface()) {
+            self.set_window_fullscreen(&window, false);
+        }
+    }
+
+    fn parent_changed(&mut self, surface: ToplevelSurface) {
+        if let Some(window) = self.window_for_surface(surface.wl_surface()) {
+            self.refresh_window_hints(&window);
+        }
+    }
+
+    fn move_request(&mut self, surface: ToplevelSurface, seat: wl_seat::WlSeat, serial: Serial) {
+        if self.seat.owns(&seat)
+            && let Some(window) = self.window_for_surface(surface.wl_surface())
+        {
+            self.start_window_grab(window, Some(serial), None);
+        }
+    }
+
+    fn resize_request(
+        &mut self,
+        surface: ToplevelSurface,
+        seat: wl_seat::WlSeat,
+        serial: Serial,
+        edges: smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::ResizeEdge,
+    ) {
+        if self.seat.owns(&seat)
+            && let Some(edges) = crate::window_grab::ResizeEdges::from_xdg(edges)
+            && let Some(window) = self.window_for_surface(surface.wl_surface())
+        {
+            self.start_window_grab(window, Some(serial), Some(edges));
+        }
     }
 
     fn minimize_request(&mut self, surface: ToplevelSurface) {

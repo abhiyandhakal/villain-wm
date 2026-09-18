@@ -16,6 +16,7 @@ mod render;
 mod session;
 mod state;
 mod tty;
+mod window_grab;
 mod workspaces;
 mod xwayland;
 

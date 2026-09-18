@@ -146,7 +146,10 @@ impl Villain {
             // is a compositor-to-client event, not a WM capability.
             xdg_shell_state: XdgShellState::new_with_capabilities::<Self>(
                 &display_handle,
-                [xdg_toplevel::WmCapabilities::Minimize],
+                [
+                    xdg_toplevel::WmCapabilities::Minimize,
+                    xdg_toplevel::WmCapabilities::Fullscreen,
+                ],
             ),
             xwayland_shell_state: XWaylandShellState::new::<Self>(&display_handle),
             xwm: None,
