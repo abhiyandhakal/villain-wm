@@ -29,7 +29,7 @@ use smithay::{
     },
     utils::{DeviceFd, SERIAL_COUNTER, Transform},
 };
-use std::{error::Error, path::PathBuf, time::Duration};
+use std::{error::Error, path::PathBuf};
 
 type BufferedSurface = GbmBufferedSurface<GbmAllocator<DrmDeviceFd>, ()>;
 
@@ -250,6 +250,10 @@ pub fn init(
 }
 
 impl Tty {
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+
     fn render(&mut self, state: &mut Villain) -> Result<(), Box<dyn Error>> {
         let (mut buffer, age) = self.surface.next_buffer()?;
         let mut framebuffer = self.renderer.bind(&mut buffer)?;
@@ -272,21 +276,11 @@ impl Tty {
         let sync = result.sync.clone();
         let damage = result.damage.cloned();
         drop(framebuffer);
-        let submitted = if let Some(damage) = damage {
+        if let Some(damage) = damage {
             self.surface.queue_buffer(Some(sync), Some(damage), ())?;
             self.pending = true;
-            true
-        } else {
-            false
-        };
-        if submitted {
-            for window in state.space.elements() {
-                window.send_frame(&self.output, now, Some(Duration::ZERO), |_, _| {
-                    Some(self.output.clone())
-                });
-            }
-            state.cursor.send_frame(&self.output, now);
         }
+        state.schedule_frame_callbacks(&self.output);
         let delay = state.cursor.next_animation_delay(now);
         state.schedule_cursor_frame(delay);
         Ok(())
