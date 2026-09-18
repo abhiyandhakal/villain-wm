@@ -1,7 +1,5 @@
 //! The nested Winit backend and the one-frame render path.
 
-use std::time::Duration;
-
 use smithay::{
     backend::{
         input::{
@@ -206,21 +204,10 @@ fn render_frame(state: &mut Villain) {
         )?;
         let damage = result.damage.cloned();
         drop(framebuffer);
-        let submitted = if let Some(damage) = damage {
+        if let Some(damage) = damage {
             winit.backend.submit(Some(&damage))?;
-            true
-        } else {
-            false
-        };
-
-        if submitted {
-            state.space.elements().for_each(|window| {
-                window.send_frame(&winit.output, now, Some(Duration::ZERO), |_, _| {
-                    Some(winit.output.clone())
-                });
-            });
-            state.cursor.send_frame(&winit.output, now);
         }
+        state.schedule_frame_callbacks(&winit.output);
         let delay = state.cursor.next_animation_delay(now);
         state.schedule_cursor_frame(delay);
         Ok(())

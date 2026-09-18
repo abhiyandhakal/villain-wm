@@ -94,6 +94,7 @@ pub struct Villain {
     pub host_focused: bool,
     pub pressed_buttons: std::collections::HashSet<u32>,
     pub repaint_needed: bool,
+    pub frame_clock: crate::frame_clock::FrameClock,
     cursor_timer_generation: u64,
     pub(crate) loop_handle: LoopHandle<'static, Self>,
 }
@@ -174,6 +175,7 @@ impl Villain {
             host_focused: true,
             pressed_buttons: Default::default(),
             repaint_needed: true,
+            frame_clock: Default::default(),
             cursor_timer_generation: 0,
             loop_handle: event_loop.handle(),
         }
