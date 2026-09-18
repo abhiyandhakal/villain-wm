@@ -21,7 +21,6 @@ use smithay::{
         compositor::{CompositorClientState, CompositorState},
         cursor_shape::CursorShapeManagerState,
         output::OutputManagerState,
-        presentation::PresentationState,
         selection::{
             data_device::{DataDeviceState, set_data_device_focus},
             ext_data_control,
@@ -49,9 +48,6 @@ pub struct Villain {
     pub tty: Option<crate::tty::Tty>,
     pub winit: Option<crate::render::Winit>,
     pub dmabuf_state: smithay::wayland::dmabuf::DmabufState,
-    // Kept alive for the lifetime of its advertised Wayland global.
-    #[allow(dead_code)]
-    pub presentation_state: PresentationState,
     pub display_handle: DisplayHandle,
     pub socket_name: OsString,
     pub start_time: Instant,
@@ -137,10 +133,6 @@ impl Villain {
             tty: None,
             winit: None,
             dmabuf_state: smithay::wayland::dmabuf::DmabufState::new(),
-            presentation_state: PresentationState::new::<Self>(
-                &display_handle,
-                smithay::reexports::rustix::time::ClockId::Monotonic as u32,
-            ),
             display_handle: display_handle.clone(),
             socket_name,
             start_time: Instant::now(),

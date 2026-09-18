@@ -7,9 +7,7 @@ use smithay::{
             Fourcc,
             gbm::{GbmAllocator, GbmBufferFlags, GbmDevice},
         },
-        drm::{
-            DrmDevice, DrmDeviceFd, DrmEvent, DrmEventMetadata, DrmEventTime, GbmBufferedSurface,
-        },
+        drm::{DrmDevice, DrmDeviceFd, DrmEvent, GbmBufferedSurface},
         egl::{EGLContext, EGLDisplay},
         input::{
             AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, InputEvent, KeyState,
@@ -20,7 +18,7 @@ use smithay::{
         session::{Event as SessionEvent, Session, libseat::LibSeatSession},
         udev::{all_gpus, primary_gpu},
     },
-    desktop::{space::render_output, utils::OutputPresentationFeedback},
+    desktop::space::render_output,
     input::pointer::{AxisFrame, ButtonEvent},
     output::{Mode, Output, PhysicalProperties, Subpixel},
     reexports::{
@@ -28,66 +26,12 @@ use smithay::{
         drm::control::{Device, ModeTypeFlags, connector},
         input::Libinput,
         rustix::fs::OFlags,
-        wayland_protocols::wp::presentation_time::server::wp_presentation_feedback,
     },
-    utils::{DeviceFd, Monotonic, SERIAL_COUNTER, Transform},
-    wayland::presentation::Refresh,
+    utils::{DeviceFd, SERIAL_COUNTER, Transform},
 };
-use std::{
-    error::Error,
-    path::PathBuf,
-    time::{Duration, Instant},
-};
+use std::{error::Error, path::PathBuf, time::Duration};
 
-struct SubmittedFrame {
-    feedback: OutputPresentationFeedback,
-}
-
-type BufferedSurface = GbmBufferedSurface<GbmAllocator<DrmDeviceFd>, SubmittedFrame>;
-
-struct FrameStats {
-    period_started: Instant,
-    frames: u64,
-    slow_frames: u64,
-    total_render_time: Duration,
-    longest_render: Duration,
-}
-
-impl FrameStats {
-    fn new() -> Self {
-        Self {
-            period_started: Instant::now(),
-            frames: 0,
-            slow_frames: 0,
-            total_render_time: Duration::ZERO,
-            longest_render: Duration::ZERO,
-        }
-    }
-
-    fn rendered(&mut self, elapsed: Duration, refresh_interval: Duration) {
-        self.frames += 1;
-        self.total_render_time += elapsed;
-        self.longest_render = self.longest_render.max(elapsed);
-        if elapsed > refresh_interval {
-            self.slow_frames += 1;
-        }
-
-        let period = self.period_started.elapsed();
-        if period < Duration::from_secs(5) {
-            return;
-        }
-
-        let average = self.total_render_time.as_secs_f64() * 1_000.0 / self.frames as f64;
-        tracing::debug!(
-            rendered_fps = self.frames as f64 / period.as_secs_f64(),
-            average_render_ms = average,
-            longest_render_ms = self.longest_render.as_secs_f64() * 1_000.0,
-            slow_frames = self.slow_frames,
-            "TTY frame statistics"
-        );
-        *self = Self::new();
-    }
-}
+type BufferedSurface = GbmBufferedSurface<GbmAllocator<DrmDeviceFd>, ()>;
 
 pub struct Tty {
     // Display resources drop before the event loop's libseat notifier.
@@ -98,8 +42,6 @@ pub struct Tty {
     damage: OutputDamageTracker,
     active: bool,
     pending: bool,
-    refresh_interval: Duration,
-    frame_stats: FrameStats,
     pub session: LibSeatSession,
     input_devices: Vec<smithay::reexports::input::Device>,
 }
@@ -187,7 +129,6 @@ pub fn init(
         },
     );
     output.create_global::<Villain>(&state.display_handle);
-    let refresh_interval = Duration::from_secs_f64(1.0 / f64::from(mode.vrefresh().max(1)));
     let wl_mode = Mode {
         size: size.into(),
         refresh: mode.vrefresh() as i32 * 1000,
@@ -211,8 +152,6 @@ pub fn init(
         damage,
         active: true,
         pending: false,
-        refresh_interval,
-        frame_stats: FrameStats::new(),
         session: session.clone(),
         input_devices: Vec::new(),
     });
@@ -228,16 +167,12 @@ pub fn init(
     )?;
     event_loop
         .handle()
-        .insert_source(drm_notifier, |event, metadata, state| {
+        .insert_source(drm_notifier, |event, _, state| {
             if let Some(tty) = state.tty.as_mut() {
                 match event {
                     DrmEvent::VBlank(_) => {
-                        match tty.surface.frame_submitted() {
-                            Ok(Some(frame)) => tty.present_frame(frame, metadata.as_ref()),
-                            Ok(None) => {}
-                            Err(error) => {
-                                tracing::error!(%error, "page flip completion failed");
-                            }
+                        if let Err(error) = tty.surface.frame_submitted() {
+                            tracing::error!(%error, "page flip completion failed");
                         }
                         tty.pending = false;
                     }
@@ -310,43 +245,12 @@ pub fn init(
                 tracing::info!("TTY session resumed");
             }
         })?;
-    tracing::info!(
-        gpu = %path.display(),
-        ?size,
-        refresh_hz = mode.vrefresh(),
-        "TTY backend ready; Ctrl+Alt+Backspace exits, Ctrl+Alt+F1–F12 switches VT"
-    );
+    tracing::info!(gpu = %path.display(), ?size, "TTY backend ready; Ctrl+Alt+Backspace exits, Ctrl+Alt+F1–F12 switches VT");
     Ok(())
 }
 
 impl Tty {
-    fn present_frame(&mut self, mut frame: SubmittedFrame, metadata: Option<&DrmEventMetadata>) {
-        let Some(metadata) = metadata else {
-            frame.feedback.discarded();
-            tracing::debug!("page flip had no presentation timestamp");
-            return;
-        };
-
-        match metadata.time {
-            DrmEventTime::Monotonic(time) => frame.feedback.presented::<_, Monotonic>(
-                time,
-                Refresh::fixed(self.refresh_interval),
-                u64::from(metadata.sequence),
-                wp_presentation_feedback::Kind::Vsync
-                    | wp_presentation_feedback::Kind::HwClock
-                    | wp_presentation_feedback::Kind::HwCompletion,
-            ),
-            DrmEventTime::Realtime(_) => {
-                // Villain advertises CLOCK_MONOTONIC. Mixing clocks would give
-                // clients a plausible-looking but invalid presentation time.
-                frame.feedback.discarded();
-                tracing::debug!("DRM returned a realtime rather than monotonic timestamp");
-            }
-        }
-    }
-
     fn render(&mut self, state: &mut Villain) -> Result<(), Box<dyn Error>> {
-        let render_started = Instant::now();
         let (mut buffer, age) = self.surface.next_buffer()?;
         let mut framebuffer = self.renderer.bind(&mut buffer)?;
         let now = state.start_time.elapsed();
@@ -369,19 +273,8 @@ impl Tty {
         let damage = result.damage.cloned();
         drop(framebuffer);
         let submitted = if let Some(damage) = damage {
-            let mut feedback = OutputPresentationFeedback::new(&self.output);
-            for window in state.space.elements() {
-                window.take_presentation_feedback(
-                    &mut feedback,
-                    |_, _| Some(self.output.clone()),
-                    |_, _| wp_presentation_feedback::Kind::empty(),
-                );
-            }
-            self.surface
-                .queue_buffer(Some(sync), Some(damage), SubmittedFrame { feedback })?;
+            self.surface.queue_buffer(Some(sync), Some(damage), ())?;
             self.pending = true;
-            self.frame_stats
-                .rendered(render_started.elapsed(), self.refresh_interval);
             true
         } else {
             false
