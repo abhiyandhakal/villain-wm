@@ -8,6 +8,7 @@ mod config;
 mod cursor;
 mod dispatch;
 mod focus;
+mod frame_clock;
 mod handlers;
 mod ipc;
 mod keybinds;
