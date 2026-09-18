@@ -131,6 +131,16 @@ impl Villain {
         }
     }
 
+    /// Update a window's activation state and notify the client only when the
+    /// state actually changed. Sending an activation configure for every
+    /// window during every relayout creates a burst of competing configure
+    /// serials while the workspace is being switched.
+    fn set_activated(window: &Window, activated: bool) {
+        if window.set_activated(activated) {
+            Self::send_pending_configure(window);
+        }
+    }
+
     fn window_surface(
         window: &Window,
     ) -> Option<smithay::reexports::wayland_server::protocol::wl_surface::WlSurface> {
@@ -189,8 +199,7 @@ impl Villain {
             .collect();
         for window in old {
             self.space.unmap_elem(&window);
-            window.set_activated(false);
-            Self::send_pending_configure(&window);
+            Self::set_activated(&window, false);
         }
         self.active_workspace = index;
         self.relayout_active_workspace();
@@ -221,6 +230,28 @@ impl Villain {
             self.space.map_element(window, location, false);
         }
         self.refresh_pointer(0);
+
+        // A workspace switch or a newly-created window can happen while the
+        // pointer is outside the compositor's current hit-test target. Keep
+        // the seat usable in that case by assigning keyboard focus to the
+        // first visible window instead of leaving focus on an unmapped surface.
+        if self.host_focused && self.keyboard.current_focus().is_none() {
+            if let Some(window) = self.workspaces[self.active_workspace]
+                .windows
+                .iter()
+                .find(|entry| !entry.minimized)
+                .map(|entry| entry.window.clone())
+            {
+                if let Some(surface) = Self::window_surface(&window) {
+                    Self::set_activated(&window, true);
+                    self.keyboard.clone().set_focus(
+                        self,
+                        Some(surface),
+                        SERIAL_COUNTER.next_serial(),
+                    );
+                }
+            }
+        }
     }
 
     pub fn close_focused_window(&mut self) -> bool {
@@ -324,8 +355,7 @@ impl Villain {
         };
         for entry in &self.workspaces[self.active_workspace].windows {
             let activated = entry.id == id;
-            entry.window.set_activated(activated);
-            Self::send_pending_configure(&entry.window);
+            Self::set_activated(&entry.window, activated);
         }
         let keyboard = self.keyboard.clone();
         keyboard.set_focus(self, Some(surface), SERIAL_COUNTER.next_serial());
@@ -477,8 +507,7 @@ impl Villain {
                 let activated = keyboard_surface.as_ref().is_some_and(|surface| {
                     Self::window_surface(&entry.window).as_ref() == Some(surface)
                 });
-                entry.window.set_activated(activated);
-                Self::send_pending_configure(&entry.window);
+                Self::set_activated(&entry.window, activated);
             }
             let keyboard = self.keyboard.clone();
             keyboard.set_focus(self, keyboard_surface, SERIAL_COUNTER.next_serial());
