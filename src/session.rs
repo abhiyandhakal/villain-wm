@@ -58,6 +58,19 @@ pub fn prepare_environment(state: &mut Villain) {
 pub fn activate(state: &Villain, restart_portal: bool) {
     let environment = activation_environment(state);
 
+    // Session services are external processes and may wait indefinitely for a
+    // backend to initialize. Never hold up the compositor event loop (or its
+    // initial acquisition of DRM/input) while systemd or D-Bus is doing that
+    // work.
+    if let Err(error) = std::thread::Builder::new()
+        .name("villain-session-activation".into())
+        .spawn(move || activate_in_background(environment, restart_portal))
+    {
+        tracing::warn!(%error, "could not start session activation worker");
+    }
+}
+
+fn activate_in_background(environment: BTreeMap<String, String>, restart_portal: bool) {
     run(
         Command::new("systemctl")
             .args(["--user", "import-environment"])
@@ -91,13 +104,23 @@ pub fn activate(state: &Villain, restart_portal: bool) {
     if restart_portal {
         run(
             Command::new("systemctl")
-                .args(["--user", "try-restart", "xdg-desktop-portal-gtk.service"])
+                .args([
+                    "--user",
+                    "try-restart",
+                    "--no-block",
+                    "xdg-desktop-portal-gtk.service",
+                ])
                 .envs(&environment),
             "restart the GTK portal backend for Villain",
         );
         run(
             Command::new("systemctl")
-                .args(["--user", "try-restart", "xdg-desktop-portal.service"])
+                .args([
+                    "--user",
+                    "try-restart",
+                    "--no-block",
+                    "xdg-desktop-portal.service",
+                ])
                 .envs(&environment),
             "restart the desktop portal frontend for Villain",
         );
