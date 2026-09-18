@@ -29,6 +29,7 @@ use smithay::{
     },
 };
 
+use crate::config::RuntimeConfig;
 use crate::cursor::CursorState;
 use crate::workspaces::Workspace;
 
@@ -45,6 +46,7 @@ pub struct Villain {
     pub start_time: Instant,
     pub loop_signal: LoopSignal,
     _ipc_server: crate::ipc::IpcServer,
+    pub config: RuntimeConfig,
 
     /// The desktop plane: windows are mapped here and later rendered here.
     pub space: Space<Window>,
@@ -81,7 +83,11 @@ pub struct Villain {
 }
 
 impl Villain {
-    pub fn new(event_loop: &mut EventLoop<Self>, display: Display<Self>) -> Self {
+    pub fn new(
+        event_loop: &mut EventLoop<Self>,
+        display: Display<Self>,
+        config: RuntimeConfig,
+    ) -> Self {
         let display_handle = display.handle();
         let socket_name = init_wayland_listener(display, event_loop);
         let ipc_server = crate::ipc::init(event_loop, &socket_name).expect("initialize IPC server");
@@ -115,6 +121,7 @@ impl Villain {
             start_time: Instant::now(),
             loop_signal: event_loop.get_signal(),
             _ipc_server: ipc_server,
+            config,
             space: Space::default(),
             compositor_state: CompositorState::new::<Self>(&display_handle),
             // Advertise only policy that Villain currently implements. Close

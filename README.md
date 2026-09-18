@@ -267,6 +267,35 @@ another compositor. Standard clipboard, primary selection, and data-control
 protocols are available so ordinary applications and clipboard managers can
 exchange selections without leaking them into the host session.
 
+### Configuration
+
+Villain loads `~/.config/villain/config.toml` at startup. The built-in defaults
+use Super as `MOD`, enable touchpad tapping and natural scrolling, and preserve
+the existing close, minimize, terminal, and workspace bindings. See
+`config.example.toml` for the complete format.
+
+Session variables come from `~/.config/villain/environment` by default, or the
+file selected by `environment_file`. It accepts literal `KEY=VALUE` and
+`export KEY=VALUE` lines; it does not execute shell syntax or expand `$HOME`.
+Villain supplies Wayland-native defaults for XDG, Electron, Mozilla, Qt, and
+GTK applications. These values are inherited by applications spawned after a
+reload, including descendants of a newly opened terminal.
+
+Configuration reload is atomic:
+
+```console
+villainctl reload
+```
+
+Villain parses and validates the entire replacement before changing runtime
+state. A successful reload replaces the keybind registry, reapplies touchpad
+settings to connected devices, and updates the environment for future spawned
+applications. Existing application processes retain their original environment.
+
+If `config.toml` contains any `[[bind]]` entries, they replace the complete
+default binding set. `MOD` follows `modkey`; explicit `ALT`, `SUPER`, `CTRL`,
+and `SHIFT` modifiers remain available.
+
 ---
 
 ## Architecture

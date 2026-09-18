@@ -71,13 +71,13 @@ impl Villain {
         let workspace = self.active_workspace;
         let child = Command::new(program)
             .args(arguments)
-            .env("WAYLAND_DISPLAY", &self.socket_name)
-            .env_remove("WAYLAND_SOCKET")
+            .envs(&self.config.environment)
             // A shell started from a desktop terminal can inherit the host's
             // X11 display and a forced GTK backend. Neither describes the
             // session that Villain is providing to this child.
             .env_remove("DISPLAY")
-            .env_remove("GDK_BACKEND")
+            .env_remove("WAYLAND_SOCKET")
+            .env("WAYLAND_DISPLAY", &self.socket_name)
             .spawn()?;
         tracing::info!(
             pid = child.id(),

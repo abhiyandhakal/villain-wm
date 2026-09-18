@@ -3,7 +3,7 @@ use std::process::ExitCode;
 use villain_ipc::{Client, DispatchRequest, Query, Request, Response, WindowId};
 
 fn usage() -> &'static str {
-    "usage:\n  villainctl dispatch close\n  villainctl dispatch minimize\n  villainctl dispatch restore-minimized\n  villainctl dispatch workspace <1-10>\n  villainctl dispatch focus-window <id>\n  villainctl dispatch restore-window <id>\n  villainctl dispatch exec <program> [args...]\n  villainctl windows\n  villainctl workspaces\n  villainctl active-window\n  villainctl active-workspace\n  villainctl version"
+    "usage:\n  villainctl reload\n  villainctl dispatch close\n  villainctl dispatch minimize\n  villainctl dispatch restore-minimized\n  villainctl dispatch workspace <1-10>\n  villainctl dispatch focus-window <id>\n  villainctl dispatch restore-window <id>\n  villainctl dispatch exec <program> [args...]\n  villainctl windows\n  villainctl workspaces\n  villainctl active-window\n  villainctl active-workspace\n  villainctl version"
 }
 
 fn parse_number<T: std::str::FromStr>(value: Option<String>, name: &str) -> Result<T, String> {
@@ -15,6 +15,7 @@ fn parse_number<T: std::str::FromStr>(value: Option<String>, name: &str) -> Resu
 
 fn parse_request(mut args: impl Iterator<Item = String>) -> Result<Request, String> {
     match args.next().as_deref() {
+        Some("reload") => Ok(Request::Dispatch(DispatchRequest::ReloadConfig)),
         Some("dispatch") => match args.next().as_deref() {
             Some("close") => Ok(Request::Dispatch(DispatchRequest::CloseFocused)),
             Some("minimize") => Ok(Request::Dispatch(DispatchRequest::MinimizeFocused)),
@@ -90,6 +91,10 @@ mod tests {
 
     #[test]
     fn parses_milestone_commands() {
+        assert_eq!(
+            parse_request(["reload"].map(str::to_owned).into_iter()).unwrap(),
+            Request::Dispatch(DispatchRequest::ReloadConfig)
+        );
         assert_eq!(
             parse_request(
                 ["dispatch", "workspace", "2"]

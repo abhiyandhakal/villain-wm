@@ -46,6 +46,7 @@ pub struct Tty {
     active: bool,
     pending: bool,
     pub session: LibSeatSession,
+    input_devices: Vec<smithay::reexports::input::Device>,
 }
 
 pub fn init(
@@ -155,6 +156,7 @@ pub fn init(
         active: true,
         pending: false,
         session: session.clone(),
+        input_devices: Vec::new(),
     });
 
     let mut input =
@@ -308,6 +310,17 @@ impl Tty {
 
 fn process_input(event: InputEvent<LibinputInputBackend>, state: &mut Villain) {
     match event {
+        InputEvent::DeviceAdded { mut device } => {
+            configure_input_device(&mut device, state.config.input);
+            if let Some(tty) = state.tty.as_mut() {
+                tty.input_devices.push(device);
+            }
+        }
+        InputEvent::DeviceRemoved { device } => {
+            if let Some(tty) = state.tty.as_mut() {
+                tty.input_devices.retain(|candidate| candidate != &device);
+            }
+        }
         InputEvent::Keyboard { event } => crate::keybinds::handle_keyboard_event(state, event),
         InputEvent::PointerMotion { event } => {
             state.pointer_location += event.delta();
@@ -374,5 +387,40 @@ fn process_input(event: InputEvent<LibinputInputBackend>, state: &mut Villain) {
             pointer.frame(state);
         }
         _ => {}
+    }
+}
+
+fn configure_input_device(
+    device: &mut smithay::reexports::input::Device,
+    config: crate::config::InputConfig,
+) {
+    if device.config_tap_finger_count() > 0
+        && let Err(error) = device.config_tap_set_enabled(config.tap_to_click)
+    {
+        tracing::warn!(
+            device = device.name(),
+            ?error,
+            "could not configure tap-to-click"
+        );
+    }
+    if device.config_scroll_has_natural_scroll()
+        && let Err(error) = device.config_scroll_set_natural_scroll_enabled(config.natural_scroll)
+    {
+        tracing::warn!(
+            device = device.name(),
+            ?error,
+            "could not configure natural scrolling"
+        );
+    }
+}
+
+impl Villain {
+    pub fn apply_input_config(&mut self) {
+        let config = self.config.input;
+        if let Some(tty) = self.tty.as_mut() {
+            for device in &mut tty.input_devices {
+                configure_input_device(device, config);
+            }
+        }
     }
 }

@@ -8,10 +8,13 @@ use crate::state::Villain;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Dispatch {
+    ReloadConfig,
     CloseFocused,
     MinimizeFocused,
     RestoreLastMinimized,
     FocusWorkspace(usize),
+    PreviousWorkspace,
+    NextWorkspace,
     FocusWindow(WindowId),
     RestoreWindow(WindowId),
     Spawn(Vec<String>),
@@ -21,6 +24,7 @@ pub enum Dispatch {
 impl From<DispatchRequest> for Dispatch {
     fn from(request: DispatchRequest) -> Self {
         match request {
+            DispatchRequest::ReloadConfig => Self::ReloadConfig,
             DispatchRequest::CloseFocused => Self::CloseFocused,
             DispatchRequest::MinimizeFocused => Self::MinimizeFocused,
             DispatchRequest::RestoreLastMinimized => Self::RestoreLastMinimized,
@@ -35,6 +39,7 @@ impl From<DispatchRequest> for Dispatch {
 
 #[derive(Debug)]
 pub enum DispatchError {
+    Config(String),
     NoFocusedWindow,
     NoMinimizedWindow,
     InvalidWorkspace(usize),
@@ -47,6 +52,7 @@ pub enum DispatchError {
 impl fmt::Display for DispatchError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Config(error) => write!(formatter, "configuration reload failed: {error}"),
             Self::NoFocusedWindow => write!(formatter, "no window is focused"),
             Self::NoMinimizedWindow => write!(formatter, "no minimized window to restore"),
             Self::InvalidWorkspace(workspace) => {
@@ -71,6 +77,16 @@ impl std::error::Error for DispatchError {}
 impl Villain {
     pub fn dispatch(&mut self, dispatch: Dispatch) -> Result<(), DispatchError> {
         match dispatch {
+            Dispatch::ReloadConfig => {
+                let config = self
+                    .config
+                    .reload()
+                    .map_err(|error| DispatchError::Config(error.to_string()))?;
+                self.config = config;
+                self.apply_input_config();
+                tracing::info!("configuration reloaded");
+                Ok(())
+            }
             Dispatch::CloseFocused => self
                 .close_focused_window()
                 .then_some(())
@@ -88,6 +104,16 @@ impl Villain {
                     return Err(DispatchError::InvalidWorkspace(workspace));
                 }
                 self.switch_workspace(workspace - 1);
+                Ok(())
+            }
+            Dispatch::PreviousWorkspace => {
+                self.switch_workspace(
+                    (self.active_workspace + self.workspaces.len() - 1) % self.workspaces.len(),
+                );
+                Ok(())
+            }
+            Dispatch::NextWorkspace => {
+                self.switch_workspace((self.active_workspace + 1) % self.workspaces.len());
                 Ok(())
             }
             Dispatch::FocusWindow(window) => match self.focus_window(window) {

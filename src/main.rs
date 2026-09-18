@@ -4,6 +4,7 @@
 //! Both backends use the same Wayland protocol and workspace state.
 
 mod backend_selection;
+mod config;
 mod cursor;
 mod dispatch;
 mod handlers;
@@ -40,7 +41,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse options before creating sockets so --help works without a session.
     let mut event_loop: EventLoop<Villain> = EventLoop::try_new()?;
     let display = Display::new()?;
-    let mut state = Villain::new(&mut event_loop, display);
+    let config = config::RuntimeConfig::load()?;
+    let mut state = Villain::new(&mut event_loop, display, config);
     if direct {
         tty::init(&mut event_loop, &mut state)?;
     } else {

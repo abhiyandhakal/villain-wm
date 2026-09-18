@@ -1,33 +1,191 @@
-//! Compositor shortcuts are consumed; ordinary keys reach the active app.
-use crate::{dispatch::Dispatch, state::Villain};
+//! Configurable key combinations resolve to central dispatcher actions.
+
+use std::collections::HashSet;
+
 use smithay::{
     backend::input::{InputBackend, KeyState, KeyboardKeyEvent},
-    input::keyboard::{FilterResult, keysyms},
+    input::keyboard::{FilterResult, Keysym, keysyms, xkb},
     utils::SERIAL_COUNTER,
 };
 
-#[derive(Debug, PartialEq)]
+use crate::{config::BindSpec, dispatch::Dispatch, state::Villain};
+
+#[derive(Clone, Debug, PartialEq)]
 enum KeyboardAction {
     Dispatch(Dispatch),
     Vt(i32),
 }
 
-fn binding(sym: u32, active: usize, shift: bool) -> Option<Dispatch> {
-    match sym {
-        keysyms::KEY_q if !shift => Some(Dispatch::CloseFocused),
-        keysyms::KEY_m if !shift => Some(Dispatch::MinimizeFocused),
-        keysyms::KEY_m if shift => Some(Dispatch::RestoreLastMinimized),
-        _ if shift => None,
-        keysyms::KEY_Return | keysyms::KEY_KP_Enter => Some(Dispatch::Spawn(vec![
-            std::env::var("VILLAIN_TERMINAL").unwrap_or_else(|_| "kitty".into()),
-        ])),
-        keysyms::KEY_1..=keysyms::KEY_9 => Some(Dispatch::FocusWorkspace(
-            (sym - keysyms::KEY_1) as usize + 1,
-        )),
-        keysyms::KEY_0 => Some(Dispatch::FocusWorkspace(10)),
-        keysyms::KEY_Left => Some(Dispatch::FocusWorkspace((active + 9) % 10 + 1)),
-        keysyms::KEY_Right => Some(Dispatch::FocusWorkspace((active + 1) % 10 + 1)),
-        _ => None,
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct KeyCombination {
+    ctrl: bool,
+    alt: bool,
+    shift: bool,
+    super_key: bool,
+    sym: u32,
+}
+
+#[derive(Clone, Debug)]
+struct Keybind {
+    keys: KeyCombination,
+    dispatch: Dispatch,
+}
+
+#[derive(Clone, Debug)]
+pub struct KeybindRegistry {
+    bindings: Vec<Keybind>,
+}
+
+impl KeybindRegistry {
+    pub fn defaults(modkey: &str) -> Result<Self, String> {
+        let mut specs = vec![
+            spec("MOD+RETURN", "exec", &["kitty"]),
+            spec("MOD+Q", "close", &[]),
+            spec("MOD+M", "minimize", &[]),
+            spec("MOD+SHIFT+M", "restore-minimized", &[]),
+            spec("MOD+LEFT", "previous-workspace", &[]),
+            spec("MOD+RIGHT", "next-workspace", &[]),
+        ];
+        for workspace in 1..=9 {
+            specs.push(BindSpec {
+                keys: format!("MOD+{workspace}"),
+                dispatch: "workspace".into(),
+                args: vec![workspace.to_string()],
+            });
+        }
+        specs.push(spec("MOD+0", "workspace", &["10"]));
+        Self::from_specs(modkey, &specs)
+    }
+
+    pub(crate) fn from_specs(modkey: &str, specs: &[BindSpec]) -> Result<Self, String> {
+        let modkey = parse_modkey(modkey)?;
+        let mut seen = HashSet::new();
+        let mut bindings = Vec::with_capacity(specs.len());
+        for spec in specs {
+            let keys = parse_keys(&spec.keys, modkey)
+                .map_err(|error| format!("binding {:?}: {error}", spec.keys))?;
+            if !seen.insert(keys) {
+                return Err(format!("duplicate keybinding {:?}", spec.keys));
+            }
+            let dispatch = parse_dispatch(spec)
+                .map_err(|error| format!("binding {:?}: {error}", spec.keys))?;
+            bindings.push(Keybind { keys, dispatch });
+        }
+        Ok(Self { bindings })
+    }
+
+    fn find(
+        &self,
+        raw_syms: &[Keysym],
+        ctrl: bool,
+        alt: bool,
+        shift: bool,
+        super_key: bool,
+    ) -> Option<Dispatch> {
+        self.bindings
+            .iter()
+            .find(|binding| {
+                binding.keys.ctrl == ctrl
+                    && binding.keys.alt == alt
+                    && binding.keys.shift == shift
+                    && binding.keys.super_key == super_key
+                    && raw_syms
+                        .iter()
+                        .any(|symbol| symbol.raw() == binding.keys.sym)
+            })
+            .map(|binding| binding.dispatch.clone())
+    }
+}
+
+fn spec(keys: &str, dispatch: &str, args: &[&str]) -> BindSpec {
+    BindSpec {
+        keys: keys.into(),
+        dispatch: dispatch.into(),
+        args: args.iter().map(|argument| (*argument).into()).collect(),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Modkey {
+    Alt,
+    Super,
+}
+
+fn parse_modkey(value: &str) -> Result<Modkey, String> {
+    match value.to_ascii_lowercase().as_str() {
+        "alt" => Ok(Modkey::Alt),
+        "super" | "logo" => Ok(Modkey::Super),
+        _ => Err(format!("modkey must be Alt or Super, got {value:?}")),
+    }
+}
+
+fn parse_keys(value: &str, modkey: Modkey) -> Result<KeyCombination, String> {
+    let mut ctrl = false;
+    let mut alt = false;
+    let mut shift = false;
+    let mut super_key = false;
+    let mut key = None;
+    for token in value
+        .split('+')
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+    {
+        match token.to_ascii_uppercase().as_str() {
+            "CTRL" | "CONTROL" => ctrl = true,
+            "ALT" => alt = true,
+            "SHIFT" => shift = true,
+            "SUPER" | "LOGO" => super_key = true,
+            "MOD" => match modkey {
+                Modkey::Alt => alt = true,
+                Modkey::Super => super_key = true,
+            },
+            _ if key.is_none() => key = Some(token),
+            _ => return Err("a combination must contain exactly one non-modifier key".into()),
+        }
+    }
+    let key = key.ok_or_else(|| "combination has no key".to_string())?;
+    let canonical = match key.to_ascii_uppercase().as_str() {
+        "ENTER" => "Return",
+        "ESC" => "Escape",
+        "SPACE" => "space",
+        _ => key,
+    };
+    let sym = xkb::keysym_from_name(canonical, xkb::KEYSYM_CASE_INSENSITIVE).raw();
+    if sym == keysyms::KEY_NoSymbol {
+        return Err(format!("unknown key name {key:?}"));
+    }
+    Ok(KeyCombination {
+        ctrl,
+        alt,
+        shift,
+        super_key,
+        sym,
+    })
+}
+
+fn parse_dispatch(spec: &BindSpec) -> Result<Dispatch, String> {
+    match spec.dispatch.as_str() {
+        "close" if spec.args.is_empty() => Ok(Dispatch::CloseFocused),
+        "minimize" if spec.args.is_empty() => Ok(Dispatch::MinimizeFocused),
+        "restore-minimized" if spec.args.is_empty() => Ok(Dispatch::RestoreLastMinimized),
+        "previous-workspace" if spec.args.is_empty() => Ok(Dispatch::PreviousWorkspace),
+        "next-workspace" if spec.args.is_empty() => Ok(Dispatch::NextWorkspace),
+        "quit" if spec.args.is_empty() => Ok(Dispatch::Quit),
+        "exec" if !spec.args.is_empty() => Ok(Dispatch::Spawn(spec.args.clone())),
+        "workspace" if spec.args.len() == 1 => {
+            let workspace = spec.args[0]
+                .parse()
+                .map_err(|_| "workspace argument must be a number".to_string())?;
+            if !(1..=10).contains(&workspace) {
+                return Err("workspace argument must be between 1 and 10".into());
+            }
+            Ok(Dispatch::FocusWorkspace(workspace))
+        }
+        "close" | "minimize" | "restore-minimized" | "previous-workspace" | "next-workspace"
+        | "quit" => Err("dispatch does not accept arguments".into()),
+        "exec" => Err("exec requires a program in args".into()),
+        "workspace" => Err("workspace requires exactly one argument".into()),
+        dispatch => Err(format!("unknown dispatch {dispatch:?}")),
     }
 }
 
@@ -81,13 +239,13 @@ pub fn handle_keyboard_event<B: InputBackend>(
                 }
             }
             if pressed
-                && mods.alt
-                && !mods.ctrl
-                && !mods.logo
-                && let Some(action) = key
-                    .raw_syms()
-                    .iter()
-                    .find_map(|sym| binding(sym.raw(), state.active_workspace, mods.shift))
+                && let Some(action) = state.config.keybinds.find(
+                    &key.raw_syms(),
+                    mods.ctrl,
+                    mods.alt,
+                    mods.shift,
+                    mods.logo,
+                )
             {
                 state.suppressed_keys.insert(code);
                 return FilterResult::Intercept(Some(KeyboardAction::Dispatch(action)));
@@ -116,43 +274,50 @@ pub fn handle_keyboard_event<B: InputBackend>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
-    fn workspace_numbers_and_wraparound() {
+    fn modkey_changes_all_default_bindings() {
+        let super_registry = KeybindRegistry::defaults("Super").unwrap();
+        let q = [Keysym::new(keysyms::KEY_q)];
         assert_eq!(
-            binding(keysyms::KEY_1, 5, false),
-            Some(Dispatch::FocusWorkspace(1))
-        );
-        assert_eq!(
-            binding(keysyms::KEY_0, 5, false),
-            Some(Dispatch::FocusWorkspace(10))
-        );
-        assert_eq!(
-            binding(keysyms::KEY_Left, 0, false),
-            Some(Dispatch::FocusWorkspace(10))
-        );
-        assert_eq!(
-            binding(keysyms::KEY_Right, 9, false),
-            Some(Dispatch::FocusWorkspace(1))
-        );
-        assert_eq!(
-            binding(keysyms::KEY_Return, 0, false),
-            Some(Dispatch::Spawn(vec![
-                std::env::var("VILLAIN_TERMINAL").unwrap_or_else(|_| "kitty".into())
-            ]))
-        );
-        assert_eq!(
-            binding(keysyms::KEY_q, 0, false),
+            super_registry.find(&q, false, false, false, true),
             Some(Dispatch::CloseFocused)
         );
+        assert_eq!(super_registry.find(&q, false, true, false, false), None);
+
+        let alt_registry = KeybindRegistry::defaults("Alt").unwrap();
         assert_eq!(
-            binding(keysyms::KEY_m, 0, false),
-            Some(Dispatch::MinimizeFocused)
+            alt_registry.find(&q, false, true, false, false),
+            Some(Dispatch::CloseFocused)
         );
+    }
+
+    #[test]
+    fn invalid_and_duplicate_bindings_are_rejected() {
+        assert!(parse_keys("MOD+DOES_NOT_EXIST", Modkey::Super).is_err());
+        let duplicate = vec![spec("MOD+Q", "close", &[]), spec("MOD+Q", "minimize", &[])];
+        assert!(KeybindRegistry::from_specs("Super", &duplicate).is_err());
+    }
+
+    #[test]
+    fn configured_exec_keeps_arguments() {
+        let registry = KeybindRegistry::from_specs(
+            "Super",
+            &[spec("MOD+RETURN", "exec", &["kitty", "--single-instance"])],
+        )
+        .unwrap();
         assert_eq!(
-            binding(keysyms::KEY_m, 0, true),
-            Some(Dispatch::RestoreLastMinimized)
+            registry.find(
+                &[Keysym::new(keysyms::KEY_Return)],
+                false,
+                false,
+                false,
+                true,
+            ),
+            Some(Dispatch::Spawn(vec![
+                "kitty".into(),
+                "--single-instance".into()
+            ]))
         );
-        assert_eq!(binding(keysyms::KEY_1, 0, true), None);
-        assert_eq!(binding(keysyms::KEY_t, 0, false), None);
     }
 }

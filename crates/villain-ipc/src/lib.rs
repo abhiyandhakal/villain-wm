@@ -35,6 +35,7 @@ pub struct WorkspaceInfo {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "action", rename_all = "kebab-case")]
 pub enum DispatchRequest {
+    ReloadConfig,
     CloseFocused,
     MinimizeFocused,
     RestoreLastMinimized,
