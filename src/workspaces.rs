@@ -1,5 +1,5 @@
 //! Ordered workspaces with a master-and-stack layout.
-use crate::state::Villain;
+use crate::{focus::KeyboardFocus, state::Villain};
 use smithay::{
     desktop::{Window, WindowSurfaceType},
     input::pointer::MotionEvent,
@@ -229,28 +229,39 @@ impl Villain {
             Self::configure_window(&window, location, size);
             self.space.map_element(window, location, false);
         }
+        self.refresh_unmanaged_x11_windows();
+        self.sync_x11_stacking();
+        // An implicit button grab must not survive minimizing its window.
+        if self.pointer.current_focus().is_some_and(|surface| {
+            let root =
+                std::iter::successors(Some(surface), smithay::wayland::compositor::get_parent)
+                    .last()
+                    .unwrap();
+            !self
+                .window_for_surface(&root)
+                .is_some_and(|window| self.space.element_location(&window).is_some())
+        }) {
+            self.release_pointer_buttons();
+        }
         self.refresh_pointer(0);
 
         // A workspace switch or a newly-created window can happen while the
         // pointer is outside the compositor's current hit-test target. Keep
         // the seat usable in that case by assigning keyboard focus to the
         // first visible window instead of leaving focus on an unmapped surface.
-        if self.host_focused && self.keyboard.current_focus().is_none() {
-            if let Some(window) = self.workspaces[self.active_workspace]
+        if self.host_focused
+            && self.keyboard.current_focus().is_none()
+            && let Some(window) = self.workspaces[self.active_workspace]
                 .windows
                 .iter()
                 .find(|entry| !entry.minimized)
                 .map(|entry| entry.window.clone())
-            {
-                if let Some(surface) = Self::window_surface(&window) {
-                    Self::set_activated(&window, true);
-                    self.keyboard.clone().set_focus(
-                        self,
-                        Some(surface),
-                        SERIAL_COUNTER.next_serial(),
-                    );
-                }
-            }
+            && let Some(surface) = KeyboardFocus::for_window(&window)
+        {
+            Self::set_activated(&window, true);
+            self.keyboard
+                .clone()
+                .set_focus(self, Some(surface), SERIAL_COUNTER.next_serial());
         }
     }
 
@@ -294,6 +305,7 @@ impl Villain {
                         continue;
                     };
                     entry.minimized = true;
+                    Self::set_activated(&entry.window, false);
                     let window = entry.window.clone();
                     workspace
                         .minimized_history
@@ -340,7 +352,7 @@ impl Villain {
                             (
                                 workspace,
                                 entry.minimized,
-                                Self::window_surface(&entry.window),
+                                KeyboardFocus::for_window(&entry.window),
                             )
                         })
                 })?;
@@ -383,7 +395,10 @@ impl Villain {
     }
 
     pub fn window_info(&self) -> Vec<WindowInfo> {
-        let focused = self.keyboard.current_focus();
+        let focused = self
+            .keyboard
+            .current_focus()
+            .and_then(|focus| focus.wl_surface().map(|surface| surface.into_owned()));
         self.workspaces
             .iter()
             .enumerate()
@@ -454,7 +469,7 @@ impl Villain {
         self.workspaces[self.active_workspace]
             .windows
             .iter()
-            .find(|entry| Self::window_surface(&entry.window).as_ref() == Some(&focused))
+            .find(|entry| KeyboardFocus::for_window(&entry.window).as_ref() == Some(&focused))
             .map(|entry| entry.window.clone())
     }
 
@@ -478,8 +493,25 @@ impl Villain {
             .or_else(|| {
                 self.unmanaged_x11_windows
                     .iter()
-                    .find(|window| Self::window_surface(window).as_ref() == Some(surface))
-                    .cloned()
+                    .find(|entry| Self::window_surface(&entry.window).as_ref() == Some(surface))
+                    .map(|entry| entry.window.clone())
+            })
+    }
+
+    pub fn workspace_for_window(&self, window: &Window) -> Option<usize> {
+        self.workspaces
+            .iter()
+            .position(|workspace| {
+                workspace
+                    .windows
+                    .iter()
+                    .any(|entry| entry.window == *window)
+            })
+            .or_else(|| {
+                self.unmanaged_x11_windows
+                    .iter()
+                    .find(|entry| entry.window == *window)
+                    .map(|entry| entry.workspace)
             })
     }
 
@@ -488,8 +520,22 @@ impl Villain {
             .iter()
             .flat_map(|workspace| &workspace.windows)
             .map(|entry| &entry.window)
-            .chain(self.unmanaged_x11_windows.iter())
+            .chain(self.unmanaged_x11_windows.iter().map(|entry| &entry.window))
             .find(|window| window.x11_surface() == Some(surface))
+            .cloned()
+    }
+
+    pub fn window_for_x11_id(&self, id: u32) -> Option<Window> {
+        self.workspaces
+            .iter()
+            .flat_map(|workspace| &workspace.windows)
+            .map(|entry| &entry.window)
+            .chain(self.unmanaged_x11_windows.iter().map(|entry| &entry.window))
+            .find(|window| {
+                window
+                    .x11_surface()
+                    .is_some_and(|surface| surface.window_id() == id)
+            })
             .cloned()
     }
 
@@ -498,14 +544,34 @@ impl Villain {
             .space
             .element_under(self.pointer_location)
             .map(|(window, location)| (window.clone(), location));
-        let keyboard_surface = hit
-            .as_ref()
-            .filter(|_| self.host_focused)
-            .and_then(|(window, _)| Self::window_surface(window));
+        let keyboard_surface =
+            hit.as_ref()
+                .filter(|_| self.host_focused)
+                .and_then(|(window, _)| {
+                    if window
+                        .x11_surface()
+                        .is_some_and(|surface| surface.is_override_redirect())
+                    {
+                        self.unmanaged_x11_windows
+                            .iter()
+                            .find(|entry| entry.window == *window)
+                            .and_then(|entry| entry.parent.as_ref())
+                            .and_then(KeyboardFocus::for_window)
+                            .or_else(|| {
+                                self.keyboard.current_focus().filter(|focus| {
+                                    self.space.elements().any(|window| {
+                                        KeyboardFocus::for_window(window).as_ref() == Some(focus)
+                                    })
+                                })
+                            })
+                    } else {
+                        KeyboardFocus::for_window(window)
+                    }
+                });
         if self.keyboard.current_focus() != keyboard_surface {
             for entry in &self.workspaces[self.active_workspace].windows {
                 let activated = keyboard_surface.as_ref().is_some_and(|surface| {
-                    Self::window_surface(&entry.window).as_ref() == Some(surface)
+                    KeyboardFocus::for_window(&entry.window).as_ref() == Some(surface)
                 });
                 Self::set_activated(&entry.window, activated);
             }
@@ -575,10 +641,15 @@ impl Villain {
     pub fn remove_x11_window(&mut self, surface: &X11Surface) {
         if let Some(window) = self.window_for_x11_surface(surface) {
             if surface.is_override_redirect() {
+                if self.pointer.current_focus() == Self::window_surface(&window) {
+                    self.release_pointer_buttons();
+                }
                 self.space.unmap_elem(&window);
                 self.unmanaged_x11_windows
-                    .retain(|candidate| candidate != &window);
-                self.request_repaint();
+                    .retain(|entry| entry.window != window);
+                self.refresh_unmanaged_x11_windows();
+                self.sync_x11_stacking();
+                self.refresh_pointer(0);
             } else {
                 self.remove_managed_window(&window);
             }
