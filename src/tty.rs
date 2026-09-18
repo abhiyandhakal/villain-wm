@@ -178,8 +178,11 @@ pub fn init(
                         tty.pending = false;
                     }
                     DrmEvent::Error(error) => {
-                        tracing::error!(%error, "DRM event failed");
-                        state.loop_signal.stop();
+                        // Revoking DRM master during a VT switch can invalidate
+                        // an outstanding page flip. This is recoverable.
+                        tracing::warn!(%error, "DRM event failed; scheduling a fresh frame");
+                        tty.pending = false;
+                        tty.surface.reset_buffers();
                     }
                 }
             }
@@ -206,47 +209,60 @@ pub fn init(
                 state.refresh_pointer(0);
                 if let Some(tty) = state.tty.as_mut() {
                     tty.active = false;
-                    // A VT switch can prevent delivery of the last flip event.
-                    // Retire that in-flight buffer before starting a fresh frame.
-                    let _ = tty.surface.frame_submitted();
                     tty.drm.pause();
+                    // A VT switch can prevent delivery of the last flip event.
+                    // Retire only a frame Villain actually submitted.
+                    if tty.pending
+                        && let Err(error) = tty.surface.frame_submitted()
+                    {
+                        tracing::debug!(%error, "could not retire paused DRM frame");
+                    }
+                    tty.pending = false;
+                    tty.surface.reset_buffers();
                 }
+                tracing::info!("TTY session paused");
             }
             SessionEvent::ActivateSession => {
-                let result = state.tty.as_mut().unwrap().drm.activate(true);
-                if let Err(error) = result {
-                    tracing::error!(%error, "DRM resume failed");
-                    state.loop_signal.stop();
-                    return;
-                }
                 if let Err(error) = input.resume() {
-                    tracing::error!(?error, "input resume failed");
-                    state.loop_signal.stop();
-                    return;
+                    // Smithay's reference backend keeps the recovered display
+                    // alive even if an input device fails to resume.
+                    tracing::warn!(?error, "input resume failed");
                 }
                 let tty = state.tty.as_mut().unwrap();
+                // Preserve connector state. Resetting every connector here
+                // invalidates the existing DRM surface during VT handoff.
+                if let Err(error) = tty.drm.activate(false) {
+                    tracing::error!(%error, "DRM resume failed; waiting for another activation");
+                    return;
+                }
                 tty.surface.reset_buffers();
                 tty.pending = false;
                 tty.active = true;
                 tty.damage = OutputDamageTracker::from_output(&tty.output);
                 state.host_focused = true;
                 state.refresh_pointer(0);
+                tracing::info!("TTY session resumed");
             }
         })?;
     event_loop
         .handle()
         .insert_source(Timer::immediate(), |_, _, state| {
+            let mut retry_delay = Duration::from_millis(8);
             if let Some(mut tty) = state.tty.take() {
                 if tty.active
                     && !tty.pending
                     && let Err(error) = tty.render(state)
                 {
-                    tracing::error!(%error, "DRM render failed; exiting to release the seat");
-                    state.loop_signal.stop();
+                    // The first frame after regaining DRM master can race the
+                    // kernel handoff. Discard stale buffers and retry.
+                    tracing::warn!(%error, "DRM render failed; resetting buffers and retrying");
+                    tty.pending = false;
+                    tty.surface.reset_buffers();
+                    retry_delay = Duration::from_millis(100);
                 }
                 state.tty = Some(tty);
             }
-            TimeoutAction::ToDuration(Duration::from_millis(8))
+            TimeoutAction::ToDuration(retry_delay)
         })?;
     tracing::info!(gpu = %path.display(), ?size, "TTY backend ready; Ctrl+Alt+Backspace exits, Ctrl+Alt+F1–F12 switches VT");
     Ok(())
