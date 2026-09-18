@@ -152,7 +152,7 @@ fn resolve_path(value: &str, base: Option<&Path>) -> Result<PathBuf, ConfigError
 }
 
 fn default_environment() -> BTreeMap<String, String> {
-    let mut environment: BTreeMap<_, _> = [
+    [
         ("XDG_SESSION_TYPE", "wayland"),
         ("XDG_CURRENT_DESKTOP", "Villain"),
         ("XDG_SESSION_DESKTOP", "villain"),
@@ -163,11 +163,7 @@ fn default_environment() -> BTreeMap<String, String> {
     ]
     .into_iter()
     .map(|(key, value)| (key.into(), value.into()))
-    .collect();
-    if let Some(session) = crate::session_launch::environment() {
-        environment.extend(session);
-    }
-    environment
+    .collect()
 }
 
 fn parse_environment(

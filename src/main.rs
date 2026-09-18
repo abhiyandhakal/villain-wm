@@ -11,7 +11,6 @@ mod handlers;
 mod ipc;
 mod keybinds;
 mod render;
-mod session_launch;
 mod state;
 mod tty;
 mod workspaces;
@@ -20,9 +19,6 @@ use smithay::reexports::{calloop::EventLoop, wayland_server::Display};
 use state::Villain;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    if session_launch::is_shim_invocation() {
-        return session_launch::exec_shim().map_err(Into::into);
-    }
     init_logging();
 
     let args: Vec<_> = std::env::args().skip(1).collect();
@@ -42,7 +38,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         backend = if direct { "tty" } else { "winit" },
         "selected backend"
     );
-    session_launch::install()?;
     // Parse options before creating sockets so --help works without a session.
     let mut event_loop: EventLoop<'static, Villain> = EventLoop::try_new()?;
     let display = Display::new()?;
