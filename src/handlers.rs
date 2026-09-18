@@ -70,18 +70,20 @@ impl CompositorHandler for Villain {
             // on each output.
             window.on_commit();
 
-            let initial_configure_sent = with_states(surface, |states| {
-                states
-                    .data_map
-                    .get::<XdgToplevelSurfaceData>()
-                    .expect("XDG toplevel data")
-                    .lock()
-                    .unwrap()
-                    .initial_configure_sent
-            });
+            if let Some(toplevel) = window.toplevel() {
+                let initial_configure_sent = with_states(surface, |states| {
+                    states
+                        .data_map
+                        .get::<XdgToplevelSurfaceData>()
+                        .expect("XDG toplevel data")
+                        .lock()
+                        .unwrap()
+                        .initial_configure_sent
+                });
 
-            if !initial_configure_sent {
-                window.toplevel().unwrap().send_configure();
+                if !initial_configure_sent {
+                    toplevel.send_configure();
+                }
             }
             // A repaint can change the pointer's surface-local coordinates,
             // but it must not override focus chosen by a dispatcher.
@@ -102,6 +104,37 @@ impl ShmHandler for Villain {
 
 impl SelectionHandler for Villain {
     type SelectionUserData = ();
+
+    fn new_selection(
+        &mut self,
+        selection: smithay::wayland::selection::SelectionTarget,
+        source: Option<smithay::wayland::selection::SelectionSource>,
+        _seat: Seat<Self>,
+    ) {
+        let Some(xwm) = self.xwm.as_mut() else {
+            return;
+        };
+        let mime_types = source.map(|source| source.mime_types());
+        if let Err(error) = xwm.new_selection(selection, mime_types) {
+            tracing::warn!(%error, ?selection, "could not export Wayland selection to XWayland");
+        }
+    }
+
+    fn send_selection(
+        &mut self,
+        selection: smithay::wayland::selection::SelectionTarget,
+        mime_type: String,
+        fd: OwnedFd,
+        _seat: Seat<Self>,
+        _user_data: &Self::SelectionUserData,
+    ) {
+        let Some(xwm) = self.xwm.as_mut() else {
+            return;
+        };
+        if let Err(error) = xwm.send_selection(selection, mime_type, fd, self.loop_handle.clone()) {
+            tracing::warn!(%error, ?selection, "could not transfer XWayland selection");
+        }
+    }
 }
 
 impl DataDeviceHandler for Villain {
@@ -151,7 +184,9 @@ impl XdgShellHandler for Villain {
     }
 
     fn minimize_request(&mut self, surface: ToplevelSurface) {
-        self.apply_window_action(&surface, WindowAction::Minimize);
+        if let Some(window) = self.window_for_surface(surface.wl_surface()) {
+            self.apply_window_action(&window, WindowAction::Minimize);
+        }
     }
 
     fn new_popup(&mut self, _surface: PopupSurface, _positioner: PositionerState) {}

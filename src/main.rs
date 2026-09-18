@@ -11,9 +11,11 @@ mod handlers;
 mod ipc;
 mod keybinds;
 mod render;
+mod session;
 mod state;
 mod tty;
 mod workspaces;
+mod xwayland;
 
 use smithay::reexports::{calloop::EventLoop, wayland_server::Display};
 use state::Villain;
@@ -43,10 +45,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let display = Display::new()?;
     let config = config::RuntimeConfig::load()?;
     let mut state = Villain::new(&mut event_loop, display, config);
+    state.owns_session = direct;
+    session::prepare_environment(&mut state);
+    xwayland::init(&mut event_loop, &mut state);
     if direct {
         tty::init(&mut event_loop, &mut state)?;
     } else {
         render::init_winit(&mut event_loop, &mut state)?;
+    }
+    if direct {
+        session::activate(&state, true);
     }
 
     tracing::info!(socket = ?state.socket_name, "Villain is ready");

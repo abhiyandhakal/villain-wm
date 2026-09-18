@@ -30,7 +30,9 @@ use smithay::{
         shell::xdg::XdgShellState,
         shm::ShmState,
         socket::ListeningSocketSource,
+        xwayland_shell::XWaylandShellState,
     },
+    xwayland::X11Wm,
 };
 
 use crate::config::RuntimeConfig;
@@ -60,6 +62,10 @@ pub struct Villain {
     // protocol's bookkeeping and exposes it through a trait implementation.
     pub compositor_state: CompositorState,
     pub xdg_shell_state: XdgShellState,
+    pub xwayland_shell_state: XWaylandShellState,
+    pub xwm: Option<X11Wm>,
+    pub xwayland_display: Option<u32>,
+    pub owns_session: bool,
     pub shm_state: ShmState,
     pub data_device_state: DataDeviceState,
     pub primary_selection_state: PrimarySelectionState,
@@ -73,11 +79,13 @@ pub struct Villain {
     // XDG shell dispatch needs to know what a compositor considers a seat,
     // even before Villain creates real keyboard or pointer devices.
     pub seat_state: SeatState<Self>,
+    pub seat: smithay::input::Seat<Self>,
     pub keyboard: KeyboardHandle<Self>,
     pub pointer: smithay::input::pointer::PointerHandle<Self>,
     pub pointer_location: smithay::utils::Point<f64, smithay::utils::Logical>,
     pub cursor: CursorState,
     pub workspaces: [Workspace; 10],
+    pub unmanaged_x11_windows: Vec<Window>,
     pub active_workspace: usize,
     pub next_window_id: u64,
     pub output_size: smithay::utils::Size<i32, smithay::utils::Logical>,
@@ -87,7 +95,7 @@ pub struct Villain {
     pub pressed_buttons: std::collections::HashSet<u32>,
     pub repaint_needed: bool,
     cursor_timer_generation: u64,
-    loop_handle: LoopHandle<'static, Self>,
+    pub(crate) loop_handle: LoopHandle<'static, Self>,
 }
 
 impl Villain {
@@ -139,6 +147,10 @@ impl Villain {
                 &display_handle,
                 [xdg_toplevel::WmCapabilities::Minimize],
             ),
+            xwayland_shell_state: XWaylandShellState::new::<Self>(&display_handle),
+            xwm: None,
+            xwayland_display: None,
+            owns_session: false,
             shm_state: ShmState::new::<Self>(&display_handle, vec![]),
             data_device_state,
             primary_selection_state,
@@ -147,11 +159,13 @@ impl Villain {
             cursor_shape_state: CursorShapeManagerState::new::<Self>(&display_handle),
             output_manager_state: OutputManagerState::new_with_xdg_output::<Self>(&display_handle),
             seat_state,
+            seat,
             keyboard,
             pointer,
             pointer_location: (0.0, 0.0).into(),
             cursor: CursorState::new(),
             workspaces: std::array::from_fn(|_| Workspace::default()),
+            unmanaged_x11_windows: Vec::new(),
             active_workspace: 0,
             next_window_id: 1,
             output_size: (800, 600).into(),

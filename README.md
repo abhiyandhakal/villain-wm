@@ -267,6 +267,13 @@ another compositor. Standard clipboard, primary selection, and data-control
 protocols are available so ordinary applications and clipboard managers can
 exchange selections without leaking them into the host session.
 
+Villain starts XWayland as an optional compatibility subsystem. X11 windows
+use the same workspace, layout, focus, close, and minimize model as native
+Wayland windows, while override-redirect surfaces remain unmanaged. Clipboard
+and primary selections are bridged in both directions. `DISPLAY` is only
+exported after XWayland reports that it is ready; native Wayland operation
+continues if XWayland is unavailable.
+
 ### Configuration
 
 Villain loads `~/.config/villain/config.toml` at startup. The built-in defaults
@@ -291,6 +298,20 @@ Villain parses and validates the entire replacement before changing runtime
 state. A successful reload replaces the keybind registry, reapplies touchpad
 settings to connected devices, and updates the environment for future spawned
 applications. Existing application processes retain their original environment.
+
+On the direct TTY backend, Villain publishes its display and desktop variables
+to the systemd user manager and D-Bus activation environment. This lets
+`xdg-desktop-portal` and its GTK backend connect to the Villain session. The
+shipped `share/xdg-desktop-portal/villain-portals.conf` selects GTK for the
+generic portals it implements, including file choosers, notifications,
+printing, and settings. Packaged builds should install that file below their
+matching `share` prefix. Nested development mode deliberately leaves the host
+desktop's activation environment alone.
+
+Screen capture is a separate portal backend concern. Villain does not claim
+Hyprland's portal backend: screenshot, screencast, remote-desktop, and global
+shortcut portals remain unavailable until Villain provides the corresponding
+capture protocols and backend.
 
 If `config.toml` contains any `[[bind]]` entries, they replace the complete
 default binding set. `MOD` follows `modkey`; explicit `ALT`, `SUPER`, `CTRL`,

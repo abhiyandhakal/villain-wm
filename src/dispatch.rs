@@ -83,6 +83,10 @@ impl Villain {
                     .reload()
                     .map_err(|error| DispatchError::Config(error.to_string()))?;
                 self.config = config;
+                crate::session::prepare_environment(self);
+                if self.owns_session {
+                    crate::session::activate(self, false);
+                }
                 self.apply_input_config();
                 tracing::info!("configuration reloaded");
                 Ok(())

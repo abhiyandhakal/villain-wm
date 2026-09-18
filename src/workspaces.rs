@@ -4,8 +4,9 @@ use smithay::{
     desktop::{Window, WindowSurfaceType},
     input::pointer::MotionEvent,
     reexports::{wayland_protocols::xdg::shell::server::xdg_toplevel, wayland_server::Resource},
-    utils::{Point, SERIAL_COUNTER, Size},
-    wayland::shell::xdg::ToplevelSurface,
+    utils::{Point, Rectangle, SERIAL_COUNTER, Size},
+    wayland::{seat::WaylandFocus, shell::xdg::ToplevelSurface},
+    xwayland::X11Surface,
 };
 use std::process::Command;
 use villain_ipc::{WindowId, WindowInfo, WorkspaceInfo};
@@ -69,7 +70,8 @@ impl Villain {
         };
         self.reap_children();
         let workspace = self.active_workspace;
-        let child = Command::new(program)
+        let mut command = Command::new(program);
+        command
             .args(arguments)
             .envs(&self.config.environment)
             // A shell started from a desktop terminal can inherit the host's
@@ -77,8 +79,11 @@ impl Villain {
             // session that Villain is providing to this child.
             .env_remove("DISPLAY")
             .env_remove("WAYLAND_SOCKET")
-            .env("WAYLAND_DISPLAY", &self.socket_name)
-            .spawn()?;
+            .env("WAYLAND_DISPLAY", &self.socket_name);
+        if let Some(display) = self.xwayland_display {
+            command.env("DISPLAY", format!(":{display}"));
+        }
+        let child = command.spawn()?;
         tracing::info!(
             pid = child.id(),
             workspace = workspace + 1,
@@ -102,28 +107,45 @@ impl Villain {
                 }
             });
     }
-    fn configure_window(window: &Window, size: Size<i32, smithay::utils::Logical>) {
-        let surface = window.toplevel().unwrap();
-        surface.with_pending_state(|pending| {
-            pending.size = Some(size);
-            pending.states.unset(xdg_toplevel::State::Fullscreen);
-        });
-        surface.send_pending_configure();
+    fn configure_window(
+        window: &Window,
+        location: Point<i32, smithay::utils::Logical>,
+        size: Size<i32, smithay::utils::Logical>,
+    ) {
+        if let Some(surface) = window.toplevel() {
+            surface.with_pending_state(|pending| {
+                pending.size = Some(size);
+                pending.states.unset(xdg_toplevel::State::Fullscreen);
+            });
+            surface.send_pending_configure();
+        } else if let Some(surface) = window.x11_surface()
+            && let Err(error) = surface.configure(Rectangle::new(location, size))
+        {
+            tracing::warn!(%error, window = surface.window_id(), "could not tile X11 window");
+        }
     }
-    pub fn add_window(&mut self, surface: ToplevelSurface) {
-        // Associate a direct child with its launch workspace even after switching.
-        let pid = surface
-            .wl_surface()
-            .client()
-            .and_then(|client| client.get_credentials(&self.display_handle).ok())
-            .map(|credentials| credentials.pid as u32);
-        let index = self
-            .children
+
+    fn send_pending_configure(window: &Window) {
+        if let Some(surface) = window.toplevel() {
+            surface.send_pending_configure();
+        }
+    }
+
+    fn window_surface(
+        window: &Window,
+    ) -> Option<smithay::reexports::wayland_server::protocol::wl_surface::WlSurface> {
+        window.wl_surface().map(|surface| surface.into_owned())
+    }
+
+    fn workspace_for_pid(&self, pid: Option<u32>) -> usize {
+        self.children
             .iter()
             .find(|(_, child)| Some(child.id()) == pid)
             .map(|(index, _)| *index)
-            .unwrap_or(self.active_workspace);
-        let window = Window::new_wayland_window(surface);
+            .unwrap_or(self.active_workspace)
+    }
+
+    fn add_workspace_window(&mut self, index: usize, window: Window) {
         let id = WindowId(self.next_window_id);
         self.next_window_id += 1;
         self.workspaces[index].windows.push(WorkspaceWindow {
@@ -136,23 +158,50 @@ impl Villain {
             self.relayout_active_workspace();
         }
     }
+
+    pub fn add_window(&mut self, surface: ToplevelSurface) {
+        // Associate a direct child with its launch workspace even after switching.
+        let pid = surface
+            .wl_surface()
+            .client()
+            .and_then(|client| client.get_credentials(&self.display_handle).ok())
+            .map(|credentials| credentials.pid as u32);
+        let index = self.workspace_for_pid(pid);
+        self.add_workspace_window(index, Window::new_wayland_window(surface));
+    }
+
+    pub fn add_x11_window(&mut self, surface: X11Surface) {
+        if self.window_for_x11_surface(&surface).is_some() {
+            return;
+        }
+        let index = self.workspace_for_pid(surface.get_client_pid().ok());
+        self.add_workspace_window(index, Window::new_x11_window(surface));
+    }
     pub fn switch_workspace(&mut self, index: usize) {
         if index >= self.workspaces.len() {
             return;
         }
         self.release_pointer_buttons();
-        let old: Vec<_> = self.space.elements().cloned().collect();
+        let old: Vec<_> = self
+            .workspaces
+            .iter()
+            .flat_map(|workspace| workspace.windows.iter().map(|entry| entry.window.clone()))
+            .collect();
         for window in old {
             self.space.unmap_elem(&window);
             window.set_activated(false);
-            window.toplevel().unwrap().send_pending_configure();
+            Self::send_pending_configure(&window);
         }
         self.active_workspace = index;
         self.relayout_active_workspace();
     }
 
     pub fn relayout_active_workspace(&mut self) {
-        let old: Vec<_> = self.space.elements().cloned().collect();
+        let old: Vec<_> = self
+            .workspaces
+            .iter()
+            .flat_map(|workspace| workspace.windows.iter().map(|entry| entry.window.clone()))
+            .collect();
         for window in old {
             self.space.unmap_elem(&window);
         }
@@ -168,15 +217,15 @@ impl Villain {
             .into_iter()
             .zip(master_stack_layout(self.output_size, visible_count))
         {
-            Self::configure_window(&window, size);
+            Self::configure_window(&window, location, size);
             self.space.map_element(window, location, false);
         }
         self.refresh_pointer(0);
     }
 
     pub fn close_focused_window(&mut self) -> bool {
-        if let Some(surface) = self.focused_toplevel() {
-            self.apply_window_action(&surface, WindowAction::Close);
+        if let Some(window) = self.focused_window() {
+            self.apply_window_action(&window, WindowAction::Close);
             true
         } else {
             false
@@ -184,19 +233,23 @@ impl Villain {
     }
 
     pub fn minimize_focused_window(&mut self) -> bool {
-        if let Some(surface) = self.focused_toplevel() {
-            self.apply_window_action(&surface, WindowAction::Minimize);
+        if let Some(window) = self.focused_window() {
+            self.apply_window_action(&window, WindowAction::Minimize);
             true
         } else {
             false
         }
     }
 
-    pub fn apply_window_action(&mut self, surface: &ToplevelSurface, action: WindowAction) {
+    pub fn apply_window_action(&mut self, window: &Window, action: WindowAction) {
         match action {
             WindowAction::Close => {
-                if self.window_for_toplevel(surface).is_some() {
+                if let Some(surface) = window.toplevel() {
                     surface.send_close();
+                } else if let Some(surface) = window.x11_surface()
+                    && let Err(error) = surface.close()
+                {
+                    tracing::warn!(%error, window = surface.window_id(), "could not close X11 window");
                 }
             }
             WindowAction::Minimize => {
@@ -205,7 +258,7 @@ impl Villain {
                     let Some(entry) = workspace
                         .windows
                         .iter_mut()
-                        .find(|entry| entry.window.toplevel() == Some(surface) && !entry.minimized)
+                        .find(|entry| entry.window == *window && !entry.minimized)
                     else {
                         continue;
                     };
@@ -256,7 +309,7 @@ impl Villain {
                             (
                                 workspace,
                                 entry.minimized,
-                                entry.window.toplevel().unwrap().wl_surface().clone(),
+                                Self::window_surface(&entry.window),
                             )
                         })
                 })?;
@@ -266,10 +319,13 @@ impl Villain {
         if workspace != self.active_workspace {
             self.switch_workspace(workspace);
         }
+        let Some(surface) = surface else {
+            return Some(false);
+        };
         for entry in &self.workspaces[self.active_workspace].windows {
             let activated = entry.id == id;
             entry.window.set_activated(activated);
-            entry.window.toplevel().unwrap().send_pending_configure();
+            Self::send_pending_configure(&entry.window);
         }
         let keyboard = self.keyboard.clone();
         keyboard.set_focus(self, Some(surface), SERIAL_COUNTER.next_serial());
@@ -304,20 +360,29 @@ impl Villain {
             .flat_map(|(workspace, state)| {
                 let focused = focused.clone();
                 state.windows.iter().map(move |entry| {
-                    let surface = entry.window.toplevel().unwrap();
-                    let (title, app_id) =
-                        smithay::wayland::compositor::with_states(surface.wl_surface(), |states| {
-                            let attributes = states
-                                .data_map
-                                .get::<smithay::wayland::shell::xdg::XdgToplevelSurfaceData>()
-                                .expect("XDG toplevel data")
-                                .lock()
-                                .unwrap();
-                            (
-                                attributes.title.clone().unwrap_or_default(),
-                                attributes.app_id.clone().unwrap_or_default(),
-                            )
-                        });
+                    let (title, app_id, wl_surface) = if let Some(surface) = entry.window.toplevel()
+                    {
+                        let (title, app_id) = smithay::wayland::compositor::with_states(
+                            surface.wl_surface(),
+                            |states| {
+                                let attributes = states
+                                    .data_map
+                                    .get::<smithay::wayland::shell::xdg::XdgToplevelSurfaceData>()
+                                    .expect("XDG toplevel data")
+                                    .lock()
+                                    .unwrap();
+                                (
+                                    attributes.title.clone().unwrap_or_default(),
+                                    attributes.app_id.clone().unwrap_or_default(),
+                                )
+                            },
+                        );
+                        (title, app_id, Some(surface.wl_surface().clone()))
+                    } else if let Some(surface) = entry.window.x11_surface() {
+                        (surface.title(), surface.class(), surface.wl_surface())
+                    } else {
+                        (String::new(), String::new(), None)
+                    };
                     WindowInfo {
                         id: entry.id,
                         title,
@@ -326,7 +391,7 @@ impl Villain {
                         minimized: entry.minimized,
                         focused: focused
                             .as_ref()
-                            .is_some_and(|focused| focused == surface.wl_surface()),
+                            .is_some_and(|focused| wl_surface.as_ref() == Some(focused)),
                     }
                 })
             })
@@ -354,13 +419,13 @@ impl Villain {
         self.window_info().into_iter().find(|window| window.focused)
     }
 
-    fn focused_toplevel(&self) -> Option<ToplevelSurface> {
+    fn focused_window(&self) -> Option<Window> {
         let focused = self.keyboard.current_focus()?;
         self.workspaces[self.active_workspace]
             .windows
             .iter()
-            .find(|entry| entry.window.toplevel().unwrap().wl_surface() == &focused)
-            .and_then(|entry| entry.window.toplevel().cloned())
+            .find(|entry| Self::window_surface(&entry.window).as_ref() == Some(&focused))
+            .map(|entry| entry.window.clone())
     }
 
     fn window_for_toplevel(&self, surface: &ToplevelSurface) -> Option<Window> {
@@ -378,8 +443,24 @@ impl Villain {
         self.workspaces
             .iter()
             .flat_map(|workspace| &workspace.windows)
-            .find(|entry| entry.window.toplevel().unwrap().wl_surface() == surface)
+            .find(|entry| Self::window_surface(&entry.window).as_ref() == Some(surface))
             .map(|entry| entry.window.clone())
+            .or_else(|| {
+                self.unmanaged_x11_windows
+                    .iter()
+                    .find(|window| Self::window_surface(window).as_ref() == Some(surface))
+                    .cloned()
+            })
+    }
+
+    pub fn window_for_x11_surface(&self, surface: &X11Surface) -> Option<Window> {
+        self.workspaces
+            .iter()
+            .flat_map(|workspace| &workspace.windows)
+            .map(|entry| &entry.window)
+            .chain(self.unmanaged_x11_windows.iter())
+            .find(|window| window.x11_surface() == Some(surface))
+            .cloned()
     }
 
     pub fn focus_window_at_pointer(&mut self) {
@@ -390,14 +471,14 @@ impl Villain {
         let keyboard_surface = hit
             .as_ref()
             .filter(|_| self.host_focused)
-            .map(|(window, _)| window.toplevel().unwrap().wl_surface().clone());
+            .and_then(|(window, _)| Self::window_surface(window));
         if self.keyboard.current_focus() != keyboard_surface {
             for entry in &self.workspaces[self.active_workspace].windows {
                 let activated = keyboard_surface.as_ref().is_some_and(|surface| {
-                    entry.window.toplevel().unwrap().wl_surface() == surface
+                    Self::window_surface(&entry.window).as_ref() == Some(surface)
                 });
                 entry.window.set_activated(activated);
-                entry.window.toplevel().unwrap().send_pending_configure();
+                Self::send_pending_configure(&entry.window);
             }
             let keyboard = self.keyboard.clone();
             keyboard.set_focus(self, keyboard_surface, SERIAL_COUNTER.next_serial());
@@ -457,10 +538,29 @@ impl Villain {
     }
 
     pub fn remove_window(&mut self, surface: &ToplevelSurface) {
+        if let Some(window) = self.window_for_toplevel(surface) {
+            self.remove_managed_window(&window);
+        }
+    }
+
+    pub fn remove_x11_window(&mut self, surface: &X11Surface) {
+        if let Some(window) = self.window_for_x11_surface(surface) {
+            if surface.is_override_redirect() {
+                self.space.unmap_elem(&window);
+                self.unmanaged_x11_windows
+                    .retain(|candidate| candidate != &window);
+                self.request_repaint();
+            } else {
+                self.remove_managed_window(&window);
+            }
+        }
+    }
+
+    fn remove_managed_window(&mut self, target: &Window) {
         for workspace in &mut self.workspaces {
             let removed: Vec<_> = workspace
                 .windows
-                .extract_if(.., |entry| entry.window.toplevel() == Some(surface))
+                .extract_if(.., |entry| &entry.window == target)
                 .map(|entry| entry.window)
                 .collect();
             for window in removed {
