@@ -281,6 +281,13 @@ Villain supplies Wayland-native defaults for XDG, Electron, Mozilla, Qt, and
 GTK applications. These values are inherited by applications spawned after a
 reload, including descendants of a newly opened terminal.
 
+Chromium-family binaries do not consistently use those standard variables.
+For Chromium, Chrome, and ChatGPT, Villain places session-local launchers at
+the front of `PATH`. They add `--ozone-platform=wayland` while resolving the
+real application from the original `PATH`; an explicit `--ozone-platform`
+argument always wins. The launchers live only in `XDG_RUNTIME_DIR` and do not
+modify system packages or permanent shell configuration.
+
 Configuration reload is atomic:
 
 ```console
