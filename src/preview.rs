@@ -108,22 +108,11 @@ fn render(
             Fourcc::Abgr8888,
         )
         .map_err(|error| format!("could not read preview: {error}"))?;
-    let mut pixels = renderer
+    let pixels = renderer
         .map_texture(&mapping)
         .map_err(|error| format!("could not map preview: {error}"))?
         .to_vec();
-    flip_rows(&mut pixels, width as usize, height as usize);
     encode_png(&pixels, width, height)
-}
-
-fn flip_rows(pixels: &mut [u8], width: usize, height: usize) {
-    let stride = width * 4;
-    for top in 0..height / 2 {
-        let bottom = height - top - 1;
-        let (before_bottom, bottom_and_after) = pixels.split_at_mut(bottom * stride);
-        before_bottom[top * stride..(top + 1) * stride]
-            .swap_with_slice(&mut bottom_and_after[..stride]);
-    }
 }
 
 fn encode_png(pixels: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
@@ -145,15 +134,6 @@ fn encode_png(pixels: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String>
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn row_flip_is_vertical() {
-        let mut pixels = vec![1; 8];
-        pixels.extend(vec![2; 8]);
-        flip_rows(&mut pixels, 2, 2);
-        assert_eq!(&pixels[..8], &[2; 8]);
-        assert_eq!(&pixels[8..], &[1; 8]);
-    }
 
     #[test]
     fn png_encoder_produces_png_signature() {
