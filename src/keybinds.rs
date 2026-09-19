@@ -45,6 +45,7 @@ pub struct KeybindRegistry {
 impl KeybindRegistry {
     pub fn defaults(modkey: &str) -> Result<Self, String> {
         let mut specs = vec![
+            spec("MOD", "exec", &["knave-shell", "overview"]),
             spec("MOD+RETURN", "exec", &["kitty"]),
             spec("MOD+Q", "close", &[]),
             spec("MOD+M", "minimize", &[]),
@@ -374,6 +375,24 @@ mod tests {
         assert_eq!(
             alt_registry.find(&q, false, true, false, false),
             Some(Dispatch::CloseFocused)
+        );
+    }
+
+    #[test]
+    fn default_modifier_release_opens_knave_overview() {
+        let registry = KeybindRegistry::defaults("Super").unwrap();
+        assert_eq!(
+            registry.find_modifier_only(
+                &[Keysym::new(keysyms::KEY_Super_L)],
+                false,
+                false,
+                false,
+                true,
+            ),
+            Some(Dispatch::Spawn(vec![
+                "knave-shell".into(),
+                "overview".into()
+            ]))
         );
     }
 

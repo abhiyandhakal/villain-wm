@@ -315,9 +315,11 @@ continues if XWayland is unavailable.
 ### Configuration
 
 Villain loads `~/.config/villain/config.toml` at startup. The built-in defaults
-use Super as `MOD`, enable touchpad tapping and natural scrolling, and preserve
-the existing close, minimize, terminal, and workspace bindings. See
-`config.example.toml` for the complete format.
+use Super as `MOD`, open the Knave workspace overview when `MOD` is pressed and
+released on its own, enable touchpad tapping and natural scrolling, and preserve
+the close, minimize, terminal, and workspace bindings. See `config.example.toml`
+for the complete format. Modifier combinations such as `MOD+1` cancel the
+standalone overview action.
 
 Session variables come from `~/.config/villain/environment` by default, or the
 file selected by `environment_file`. It accepts literal `KEY=VALUE` and
