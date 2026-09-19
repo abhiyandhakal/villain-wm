@@ -205,6 +205,7 @@ pub fn init(
                     );
                 }
                 state.suppressed_keys.clear();
+                state.pending_modifier = None;
                 state.host_focused = false;
                 state.refresh_pointer(0);
                 if let Some(tty) = state.tty.as_mut() {

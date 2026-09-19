@@ -88,16 +88,38 @@ impl KeybindRegistry {
         shift: bool,
         super_key: bool,
     ) -> Option<Dispatch> {
-        self.bindings
-            .iter()
-            .find(|binding| {
-                binding.keys.ctrl == ctrl
-                    && binding.keys.alt == alt
-                    && binding.keys.shift == shift
-                    && binding.keys.super_key == super_key
-                    && binding.keys.key.matches(raw_syms)
-            })
+        self.find_binding(raw_syms, ctrl, alt, shift, super_key)
             .map(|binding| binding.dispatch.clone())
+    }
+
+    fn find_modifier_only(
+        &self,
+        raw_syms: &[Keysym],
+        ctrl: bool,
+        alt: bool,
+        shift: bool,
+        super_key: bool,
+    ) -> Option<Dispatch> {
+        self.find_binding(raw_syms, ctrl, alt, shift, super_key)
+            .filter(|binding| matches!(binding.keys.key, BindingKey::Modifier(_)))
+            .map(|binding| binding.dispatch.clone())
+    }
+
+    fn find_binding(
+        &self,
+        raw_syms: &[Keysym],
+        ctrl: bool,
+        alt: bool,
+        shift: bool,
+        super_key: bool,
+    ) -> Option<&Keybind> {
+        self.bindings.iter().find(|binding| {
+            binding.keys.ctrl == ctrl
+                && binding.keys.alt == alt
+                && binding.keys.shift == shift
+                && binding.keys.super_key == super_key
+                && binding.keys.key.matches(raw_syms)
+        })
     }
 }
 
@@ -235,11 +257,29 @@ pub fn handle_keyboard_event<B: InputBackend>(
         SERIAL_COUNTER.next_serial(),
         event.time_msec(),
         |state, mods, key| {
+            if !pressed
+                && state
+                    .pending_modifier
+                    .as_ref()
+                    .is_some_and(|(pending_code, _)| *pending_code == code)
+                && let Some((_, dispatch)) = state.pending_modifier.take()
+            {
+                state.suppressed_keys.remove(&code);
+                return FilterResult::Intercept(Some(KeyboardAction::Dispatch(dispatch)));
+            }
             if !pressed && state.suppressed_keys.remove(&code) {
                 return FilterResult::Intercept(None);
             }
             if state.suppressed_keys.contains(&code) {
                 return FilterResult::Intercept(None);
+            }
+            if pressed
+                && state
+                    .pending_modifier
+                    .as_ref()
+                    .is_some_and(|(pending_code, _)| *pending_code != code)
+            {
+                state.pending_modifier = None;
             }
             if pressed {
                 tracing::debug!(?code, sym = ?key.modified_sym(), "key pressed");
@@ -269,6 +309,19 @@ pub fn handle_keyboard_event<B: InputBackend>(
                     state.suppressed_keys.insert(code);
                     return FilterResult::Intercept(Some(action));
                 }
+            }
+            if pressed
+                && let Some(action) = state.config.keybinds.find_modifier_only(
+                    &key.raw_syms(),
+                    mods.ctrl,
+                    mods.alt,
+                    mods.shift,
+                    mods.logo,
+                )
+            {
+                state.pending_modifier = Some((code, action));
+                state.suppressed_keys.insert(code);
+                return FilterResult::Intercept(None);
             }
             if pressed
                 && let Some(action) = state.config.keybinds.find(
@@ -389,6 +442,26 @@ mod tests {
                 false,
             ),
             Some(Dispatch::Spawn(vec!["wofi".into()]))
+        );
+        assert_eq!(
+            super_registry.find_modifier_only(
+                &[Keysym::new(keysyms::KEY_Super_L)],
+                false,
+                false,
+                false,
+                true,
+            ),
+            Some(Dispatch::Spawn(vec!["wofi".into()]))
+        );
+        assert_eq!(
+            super_registry.find_modifier_only(
+                &[Keysym::new(keysyms::KEY_a)],
+                false,
+                false,
+                false,
+                true,
+            ),
+            None
         );
     }
 }

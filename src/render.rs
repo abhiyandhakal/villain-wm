@@ -159,6 +159,7 @@ pub fn init_winit(
                         );
                     }
                     state.suppressed_keys.clear();
+                    state.pending_modifier = None;
                 }
                 state.refresh_pointer(0);
             }
