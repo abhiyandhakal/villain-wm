@@ -1,6 +1,6 @@
 # Villain
 
-**Villain** is an experimental tiling-first Wayland compositor and window manager for the **Abhi Desktop Environment**.
+**Villain** is an experimental tiling-first Wayland compositor and window manager for the **Knave Desktop Environment**.
 
 > *Wayland compositor* was once transcribed as *villain compositor*. The name stuck.
 
@@ -8,7 +8,7 @@ Villain is an attempt to build a compositor around a simple idea:
 
 **A tiling desktop should feel like a complete desktop environment, not a collection of separately configured components.**
 
-The goal is not to reproduce Hyprland, Sway, i3, GNOME, KDE, or any other existing environment. Villain will borrow ideas where they work, follow established Wayland protocols where possible, and develop its own window-management model where existing behavior does not fit the desktop Abhi is trying to provide.
+The goal is not to reproduce Hyprland, Sway, i3, GNOME, KDE, or any other existing environment. Villain will borrow ideas where they work, follow established Wayland protocols where possible, and develop its own window-management model where existing behavior does not fit the desktop Knave is trying to provide.
 
 ---
 
@@ -26,17 +26,17 @@ The first target is:
 
 ---
 
-## Abhi Desktop Environment
+## Knave Desktop Environment
 
-Villain is one part of the larger **Abhi Desktop Environment**.
+Villain is one part of the larger **Knave Desktop Environment**.
 
 ```text
-Abhi Desktop Environment
+Knave Desktop Environment
 │
 ├── Villain
 │   └── Wayland compositor + window manager
 │
-└── abhishell
+└── knaveshell
     ├── status bar
     ├── launcher
     ├── overview
@@ -45,13 +45,13 @@ Abhi Desktop Environment
     └── other desktop UI
 ```
 
-Villain and `abhishell` are separate components, but together form one desktop experience.
+Villain and `knaveshell` are separate components, but together form one desktop experience.
 
 The separation is intentional:
 
 * **Villain** owns windows, workspaces, input, layout, focus, activation, outputs, and composition.
-* **abhishell** owns desktop-facing UI.
-* The user should normally think about **Abhi**, not about which internal component implements a particular feature.
+* **knaveshell** owns desktop-facing UI.
+* The user should normally think about **Knave**, not about which internal component implements a particular feature.
 
 ---
 
@@ -80,7 +80,7 @@ The user should not have to assemble a desktop from:
 * several unrelated configuration files,
 * and enough glue to keep them cooperating.
 
-Abhi should provide a coherent working environment out of the box.
+Knave should provide a coherent working environment out of the box.
 
 ---
 
@@ -425,15 +425,15 @@ The compositor mechanism should not dictate the desktop's window-management poli
 
 ---
 
-## Villain and abhishell
+## Villain and knaveshell
 
-`abhishell` will run separately from Villain rather than being embedded directly into the compositor process.
+`knaveshell` will run separately from Villain rather than being embedded directly into the compositor process.
 
 Conceptually:
 
 ```text
 ┌─────────────────────────┐
-│       abhishell         │
+│       knaveshell        │
 │                         │
 │ bar                     │
 │ overview                │
@@ -454,7 +454,7 @@ Conceptually:
 
 Shell surfaces such as panels, launchers, and overlays are not normal application windows and should not participate in ordinary tiling layouts.
 
-Villain exposes its window-management state and actions to `abhishell` through
+Villain exposes its window-management state and actions to `knaveshell` through
 the IPC interface below. Wayland protocols remain the interface for ordinary
 client and shell-surface behavior.
 
@@ -539,7 +539,7 @@ Linux / Wayland / DRM / input
       │                │
       └───────┬────────┘
               │
-       Abhi Desktop
+       Knave Desktop
 ```
 
 Using Smithay avoids reimplementing generic compositor infrastructure while keeping Villain's window model, layouts, workspace semantics, activation policy, and other desktop behavior under its own control.
