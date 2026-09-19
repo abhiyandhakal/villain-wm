@@ -1,6 +1,6 @@
 # ~/.config/villain/config.toml
 
-modkey = "Super"
+modkey = "Alt"
 environment_file = "~/.config/villain/environment"
 
 [input]

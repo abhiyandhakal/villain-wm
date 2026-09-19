@@ -172,6 +172,17 @@ fn wayland_floating_and_fullscreen_requests() {
         let (b, _bx, bt) = create(2, "other");
         b.commit();
         settle(&mut queue, &mut client);
+        inspect(&sender, |state| {
+            assert!(find(state, "other").focused);
+            assert!(!find(state, "primary").focused);
+            // The pointer starts over the first tiled slot. Returning to the
+            // workspace must still restore the remembered focus instead of
+            // letting that stale hit-test win.
+            state.switch_workspace(1);
+            state.switch_workspace(0);
+            state.refresh_pointer(0);
+            assert!(find(state, "other").focused);
+        });
         assert_eq!(
             (client.configures[&1].width, client.configures[&1].height),
             (400, 600)
@@ -278,6 +289,9 @@ fn wayland_floating_and_fullscreen_requests() {
             state.focus_window(id);
             assert!(mapped(state, "primary"));
             assert!(!find(state, "other").fullscreen);
+            state.switch_workspace(4);
+            state.switch_workspace(0);
+            assert!(find(state, "primary").focused);
         });
         // Set a parent after creation while viewing a different workspace.
         inspect(&sender, |state| state.switch_workspace(4));
@@ -300,6 +314,7 @@ fn wayland_floating_and_fullscreen_requests() {
             state.switch_workspace(0);
             assert!(mapped(state, "other"));
             assert!(!state.workspace_has_fullscreen(0));
+            assert!(find(state, "other").focused);
         });
     });
     let deadline = Instant::now() + Duration::from_secs(20);

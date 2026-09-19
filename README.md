@@ -293,7 +293,9 @@ The temporary mod key is `Alt` while Villain is being tested.
 | `Alt+1`–`Alt+9`, `Alt+0` | Select workspace 1–10 |
 | `Alt+Left`, `Alt+Right` | Select the previous or next workspace |
 
-Keyboard focus follows the pointer across visible windows.
+Application keyboard focus is click-to-focus; pointer motion alone does not move
+focus. Explicit compositor actions such as creating a window, switching workspaces,
+or closing a window take precedence over the pointer position.
 
 Villain renders its own cursor in both nested and direct modes. It follows
 client-provided cursor surfaces and the standard cursor-shape protocol, loading
