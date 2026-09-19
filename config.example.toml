@@ -1,6 +1,6 @@
 # ~/.config/villain/config.toml
 
-modkey = "Super"
+modkey = "Alt"
 environment_file = "~/.config/villain/environment"
 
 [input]
@@ -8,6 +8,11 @@ tap_to_click = true
 natural_scroll = true
 
 # If any [[bind]] entries are present, they replace the complete default set.
+[[bind]]
+keys = "MOD"
+dispatch = "exec"
+args = ["wofi"]
+
 [[bind]]
 keys = "MOD+RETURN"
 dispatch = "exec"
