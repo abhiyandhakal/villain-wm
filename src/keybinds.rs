@@ -17,12 +17,18 @@ enum KeyboardAction {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum BindingKey {
+    Keysym(u32),
+    Modifier(Modkey),
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct KeyCombination {
     ctrl: bool,
     alt: bool,
     shift: bool,
     super_key: bool,
-    sym: u32,
+    key: BindingKey,
 }
 
 #[derive(Clone, Debug)]
@@ -89,11 +95,23 @@ impl KeybindRegistry {
                     && binding.keys.alt == alt
                     && binding.keys.shift == shift
                     && binding.keys.super_key == super_key
-                    && raw_syms
-                        .iter()
-                        .any(|symbol| symbol.raw() == binding.keys.sym)
+                    && binding.keys.key.matches(raw_syms)
             })
             .map(|binding| binding.dispatch.clone())
+    }
+}
+
+impl BindingKey {
+    fn matches(self, raw_syms: &[Keysym]) -> bool {
+        raw_syms.iter().any(|symbol| match self {
+            Self::Keysym(expected) => symbol.raw() == expected,
+            Self::Modifier(Modkey::Alt) => {
+                matches!(symbol.raw(), keysyms::KEY_Alt_L | keysyms::KEY_Alt_R)
+            }
+            Self::Modifier(Modkey::Super) => {
+                matches!(symbol.raw(), keysyms::KEY_Super_L | keysyms::KEY_Super_R)
+            }
+        })
     }
 }
 
@@ -105,7 +123,7 @@ fn spec(keys: &str, dispatch: &str, args: &[&str]) -> BindSpec {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum Modkey {
     Alt,
     Super,
@@ -120,46 +138,60 @@ fn parse_modkey(value: &str) -> Result<Modkey, String> {
 }
 
 fn parse_keys(value: &str, modkey: Modkey) -> Result<KeyCombination, String> {
+    let tokens: Vec<_> = value
+        .split('+')
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .collect();
     let mut ctrl = false;
     let mut alt = false;
     let mut shift = false;
     let mut super_key = false;
+    let mut mod_token = false;
     let mut key = None;
-    for token in value
-        .split('+')
-        .map(str::trim)
-        .filter(|token| !token.is_empty())
-    {
+    for token in &tokens {
         match token.to_ascii_uppercase().as_str() {
             "CTRL" | "CONTROL" => ctrl = true,
             "ALT" => alt = true,
             "SHIFT" => shift = true,
             "SUPER" | "LOGO" => super_key = true,
             "MOD" => match modkey {
-                Modkey::Alt => alt = true,
-                Modkey::Super => super_key = true,
+                Modkey::Alt => {
+                    alt = true;
+                    mod_token = true;
+                }
+                Modkey::Super => {
+                    super_key = true;
+                    mod_token = true;
+                }
             },
             _ if key.is_none() => key = Some(token),
             _ => return Err("a combination must contain exactly one non-modifier key".into()),
         }
     }
-    let key = key.ok_or_else(|| "combination has no key".to_string())?;
-    let canonical = match key.to_ascii_uppercase().as_str() {
-        "ENTER" => "Return",
-        "ESC" => "Escape",
-        "SPACE" => "space",
-        _ => key,
+    let key = match key {
+        Some(key) => {
+            let canonical = match key.to_ascii_uppercase().as_str() {
+                "ENTER" => "Return",
+                "ESC" => "Escape",
+                "SPACE" => "space",
+                _ => key,
+            };
+            let sym = xkb::keysym_from_name(canonical, xkb::KEYSYM_CASE_INSENSITIVE).raw();
+            if sym == keysyms::KEY_NoSymbol {
+                return Err(format!("unknown key name {key:?}"));
+            }
+            BindingKey::Keysym(sym)
+        }
+        None if mod_token && tokens.len() == 1 => BindingKey::Modifier(modkey),
+        None => return Err("combination has no key".into()),
     };
-    let sym = xkb::keysym_from_name(canonical, xkb::KEYSYM_CASE_INSENSITIVE).raw();
-    if sym == keysyms::KEY_NoSymbol {
-        return Err(format!("unknown key name {key:?}"));
-    }
     Ok(KeyCombination {
         ctrl,
         alt,
         shift,
         super_key,
-        sym,
+        key,
     })
 }
 
@@ -318,6 +350,45 @@ mod tests {
                 "kitty".into(),
                 "--single-instance".into()
             ]))
+        );
+    }
+
+    #[test]
+    fn modifier_only_binding_matches_both_sides_of_modkey() {
+        let super_registry =
+            KeybindRegistry::from_specs("Super", &[spec("MOD", "exec", &["wofi"])]).unwrap();
+        assert_eq!(
+            super_registry.find(
+                &[Keysym::new(keysyms::KEY_Super_L)],
+                false,
+                false,
+                false,
+                true,
+            ),
+            Some(Dispatch::Spawn(vec!["wofi".into()]))
+        );
+        assert_eq!(
+            super_registry.find(
+                &[Keysym::new(keysyms::KEY_Super_R)],
+                false,
+                false,
+                false,
+                true,
+            ),
+            Some(Dispatch::Spawn(vec!["wofi".into()]))
+        );
+
+        let alt_registry =
+            KeybindRegistry::from_specs("Alt", &[spec("MOD", "exec", &["wofi"])]).unwrap();
+        assert_eq!(
+            alt_registry.find(
+                &[Keysym::new(keysyms::KEY_Alt_L)],
+                false,
+                true,
+                false,
+                false,
+            ),
+            Some(Dispatch::Spawn(vec!["wofi".into()]))
         );
     }
 }
