@@ -2,7 +2,7 @@
 name = "villain"
 version = "0.1.0"
 edition = "2024"
-description = "A tiling-first Wayland compositor and window manager for the Abhi Desktop Environment"
+description = "A tiling-first Wayland compositor and window manager for the Knave Desktop Environment"
 license = "MIT"
 
 [workspace]
