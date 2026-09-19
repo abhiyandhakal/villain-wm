@@ -10,8 +10,12 @@ use std::{
     thread,
 };
 
+use base64::Engine;
+
 use smithay::reexports::calloop::{EventLoop, channel};
-use villain_ipc::{PROTOCOL_VERSION, Query, Request, Response, socket_path_for_display};
+use villain_ipc::{
+    PROTOCOL_VERSION, Query, Request, Response, WorkspacePreview, socket_path_for_display,
+};
 
 use crate::{dispatch::Dispatch, state::Villain};
 
@@ -140,6 +144,19 @@ impl Villain {
                 Query::Workspaces => Response::Workspaces(self.workspace_info()),
                 Query::ActiveWindow => Response::ActiveWindow(self.active_window_info()),
                 Query::ActiveWorkspace => Response::ActiveWorkspace(self.active_workspace + 1),
+                Query::WorkspacePreview {
+                    workspace,
+                    width,
+                    height,
+                } => match crate::preview::capture(self, workspace, width, height) {
+                    Ok(png) => Response::WorkspacePreview(WorkspacePreview {
+                        workspace,
+                        width,
+                        height,
+                        png_base64: base64::engine::general_purpose::STANDARD.encode(png),
+                    }),
+                    Err(message) => Response::Error { message },
+                },
                 Query::Version => Response::Version {
                     protocol: PROTOCOL_VERSION,
                     villain: env!("CARGO_PKG_VERSION").into(),

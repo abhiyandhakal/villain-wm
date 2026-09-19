@@ -317,9 +317,11 @@ continues if XWayland is unavailable.
 ### Configuration
 
 Villain loads `~/.config/villain/config.toml` at startup. The built-in defaults
-use Super as `MOD`, enable touchpad tapping and natural scrolling, and preserve
-the existing close, minimize, terminal, and workspace bindings. See
-`config.example.toml` for the complete format.
+use Super as `MOD`, open the Knave workspace overview when `MOD` is pressed and
+released on its own, enable touchpad tapping and natural scrolling, and preserve
+the close, minimize, terminal, and workspace bindings. See `config.example.toml`
+for the complete format. Modifier combinations such as `MOD+1` cancel the
+standalone overview action.
 
 Session variables come from `~/.config/villain/environment` by default, or the
 file selected by `environment_file`. It accepts literal `KEY=VALUE` and
@@ -487,6 +489,12 @@ villainctl active-window
 villainctl active-workspace
 villainctl version
 ```
+
+Protocol version 2 also exposes an on-demand `workspace-preview` query for the
+shell. It returns a bounded, base64-encoded PNG rendered from the workspace's
+current client buffers. Preview requests are limited to 64x36 through 1280x720
+so a local client cannot force unbounded compositor allocations. Layer-shell
+surfaces and the cursor are intentionally excluded from workspace previews.
 
 `villainctl` discovers the compositor through `WAYLAND_DISPLAY`. Set
 `VILLAIN_SOCKET` only when an explicit socket override is needed.

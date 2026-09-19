@@ -68,6 +68,11 @@ fn master_stack_layout(
 type Geometry = Rectangle<i32, smithay::utils::Logical>;
 type WindowPlacement = (Window, Geometry, bool, bool, bool);
 
+pub(crate) struct WorkspacePreviewScene {
+    pub output_size: Size<i32, smithay::utils::Logical>,
+    pub windows: Vec<(Window, Geometry)>,
+}
+
 fn fixed_size(
     min: Size<i32, smithay::utils::Logical>,
     max: Size<i32, smithay::utils::Logical>,
@@ -330,6 +335,19 @@ impl Villain {
             }
         });
         result
+    }
+
+    pub(crate) fn workspace_preview_scene(&self, index: usize) -> Option<WorkspacePreviewScene> {
+        (index < self.workspaces.len()).then(|| WorkspacePreviewScene {
+            output_size: self.output_size,
+            windows: self
+                .workspace_layout(index)
+                .into_iter()
+                .filter_map(|(window, geometry, _, _, visible)| {
+                    visible.then_some((window, geometry))
+                })
+                .collect(),
+        })
     }
 
     fn configure_workspace(&self, index: usize) {

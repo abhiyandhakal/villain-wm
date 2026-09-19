@@ -28,6 +28,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 xcursor = "0.3.11"
 villain-ipc = { path = "crates/villain-ipc" }
 serde_json = "1"
+base64 = "0.22"
+png = "0.18"
 
 [dev-dependencies]
 wayland-client = "0.31"

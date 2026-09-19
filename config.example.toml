@@ -11,7 +11,7 @@ natural_scroll = true
 [[bind]]
 keys = "MOD"
 dispatch = "exec"
-args = ["wofi"]
+args = ["knave-shell", "overview"]
 
 [[bind]]
 keys = "MOD+RETURN"
