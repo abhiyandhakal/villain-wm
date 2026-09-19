@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 pub use client::{Client, Error as ClientError, socket_path, socket_path_for_display};
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(transparent)]
@@ -37,6 +37,16 @@ pub struct WorkspaceInfo {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct WorkspacePreview {
+    /// Human-facing, one-based workspace number.
+    pub workspace: usize,
+    pub width: u32,
+    pub height: u32,
+    /// Base64-encoded PNG bytes.
+    pub png_base64: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "action", rename_all = "kebab-case")]
 pub enum DispatchRequest {
     ReloadConfig,
@@ -57,6 +67,11 @@ pub enum Query {
     Workspaces,
     ActiveWindow,
     ActiveWorkspace,
+    WorkspacePreview {
+        workspace: usize,
+        width: u32,
+        height: u32,
+    },
     Version,
 }
 
@@ -75,6 +90,7 @@ pub enum Response {
     Workspaces(Vec<WorkspaceInfo>),
     ActiveWindow(Option<WindowInfo>),
     ActiveWorkspace(usize),
+    WorkspacePreview(WorkspacePreview),
     Version { protocol: u32, villain: String },
     Error { message: String },
 }
@@ -103,5 +119,19 @@ mod tests {
             r#"{"type":"dispatch","payload":{"action":"focus-workspace","workspace":2}}"#
         );
         assert_eq!(serde_json::from_str::<Request>(&encoded).unwrap(), request);
+    }
+
+    #[test]
+    fn preview_query_is_versioned_and_bounded_by_the_server() {
+        assert_eq!(PROTOCOL_VERSION, 2);
+        let request = Request::Query(Query::WorkspacePreview {
+            workspace: 2,
+            width: 480,
+            height: 270,
+        });
+        assert_eq!(
+            serde_json::to_string(&request).unwrap(),
+            r#"{"type":"query","payload":{"query":"workspace-preview","workspace":2,"width":480,"height":270}}"#
+        );
     }
 }

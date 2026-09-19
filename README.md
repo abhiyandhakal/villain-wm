@@ -486,6 +486,12 @@ villainctl active-workspace
 villainctl version
 ```
 
+Protocol version 2 also exposes an on-demand `workspace-preview` query for the
+shell. It returns a bounded, base64-encoded PNG rendered from the workspace's
+current client buffers. Preview requests are limited to 64x36 through 1280x720
+so a local client cannot force unbounded compositor allocations. Layer-shell
+surfaces and the cursor are intentionally excluded from workspace previews.
+
 `villainctl` discovers the compositor through `WAYLAND_DISPLAY`. Set
 `VILLAIN_SOCKET` only when an explicit socket override is needed.
 

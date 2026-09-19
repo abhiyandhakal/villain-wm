@@ -32,6 +32,10 @@ impl Winit {
             self.redraw_requested = true;
         }
     }
+
+    pub(crate) fn renderer(&mut self) -> &mut GlesRenderer {
+        self.backend.renderer()
+    }
 }
 
 /// Start a nested output and connect its events to the compositor loop.
