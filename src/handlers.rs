@@ -56,6 +56,16 @@ impl CompositorHandler for Villain {
         // This turns a client's wl_buffer commit into the state Smithay's
         // renderer can later inspect.
         on_commit_buffer_handler::<Self>(surface);
+        self.popups.commit(surface);
+        if let Some(smithay::desktop::PopupKind::Xdg(popup)) = self.popups.find_popup(surface) {
+            if !popup.is_initial_configure_sent() {
+                let _ = popup.send_configure();
+            }
+            self.request_repaint();
+        }
+        if self.layer_commit(surface) {
+            return;
+        }
 
         let root = std::iter::successors(Some(surface.clone()), |surface| {
             smithay::wayland::compositor::get_parent(surface)
@@ -65,7 +75,7 @@ impl CompositorHandler for Villain {
         let visible_window = self
             .window_for_surface(&root)
             .is_some_and(|window| self.space.element_location(&window).is_some());
-        if visible_window || self.cursor.uses_surface(&root) {
+        if visible_window || self.layer_surface_visible(&root) || self.cursor.uses_surface(&root) {
             self.request_repaint();
         }
 
@@ -243,17 +253,81 @@ impl XdgShellHandler for Villain {
         }
     }
 
-    fn new_popup(&mut self, _surface: PopupSurface, _positioner: PositionerState) {}
+    fn new_popup(&mut self, surface: PopupSurface, positioner: PositionerState) {
+        surface.with_pending_state(|state| {
+            state.geometry = positioner.get_geometry();
+            state.positioner = positioner;
+        });
+        let _ = self.popups.track_popup(surface.into());
+    }
 
     fn reposition_request(
         &mut self,
-        _surface: PopupSurface,
-        _positioner: PositionerState,
-        _token: u32,
+        surface: PopupSurface,
+        positioner: PositionerState,
+        token: u32,
     ) {
+        surface.with_pending_state(|state| {
+            state.geometry = positioner.get_geometry();
+            state.positioner = positioner;
+        });
+        surface.send_repositioned(token);
     }
 
-    fn grab(&mut self, _surface: PopupSurface, _seat: wl_seat::WlSeat, _serial: Serial) {}
+    fn popup_destroyed(&mut self, _surface: PopupSurface) {
+        self.popups.cleanup();
+        self.refresh_pointer(0);
+    }
+
+    fn grab(&mut self, surface: PopupSurface, seat: wl_seat::WlSeat, serial: Serial) {
+        use smithay::desktop::{
+            PopupKeyboardGrab, PopupKind, PopupPointerGrab, find_popup_root_surface,
+        };
+        use smithay::wayland::seat::WaylandFocus;
+        if !self.seat.owns(&seat) {
+            return;
+        }
+        let popup = PopupKind::Xdg(surface.clone());
+        let Ok(root) = find_popup_root_surface(&popup) else {
+            return;
+        };
+        // Layer popup grabs may only originate from the focused layer client.
+        // Ordinary application popup policy remains separate.
+        if !self.layer_surface_visible(&root) {
+            return;
+        }
+        let focused = self
+            .keyboard
+            .current_focus()
+            .and_then(|focus| focus.wl_surface().map(|s| s.into_owned()));
+        if focused.as_ref() != Some(&root)
+            && focused.as_ref() != surface.get_parent_surface().as_ref()
+        {
+            return;
+        }
+        if !self.pointer.has_grab(serial) && !self.keyboard.has_grab(serial) {
+            return;
+        }
+        if let Ok(grab) = self.popups.grab_popup(
+            crate::focus::KeyboardFocus::Wayland(root),
+            popup,
+            &self.seat,
+            serial,
+        ) {
+            self.keyboard
+                .clone()
+                .set_focus(self, grab.current_grab(), serial);
+            self.keyboard
+                .clone()
+                .set_grab(self, PopupKeyboardGrab::new(&grab), serial);
+            self.pointer.clone().set_grab(
+                self,
+                PopupPointerGrab::new(&grab),
+                serial,
+                smithay::input::pointer::Focus::Keep,
+            );
+        }
+    }
 }
 
 // Smithay's delegation macro connects the protocol objects to the handlers

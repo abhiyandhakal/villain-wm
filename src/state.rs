@@ -62,6 +62,9 @@ pub struct Villain {
     // protocol's bookkeeping and exposes it through a trait implementation.
     pub compositor_state: CompositorState,
     pub xdg_shell_state: XdgShellState,
+    pub layer_shell_state: smithay::wayland::shell::wlr_layer::WlrLayerShellState,
+    pub shell_surfaces: Vec<crate::layer_shell::ShellSurface>,
+    pub popups: smithay::desktop::PopupManager,
     pub xwayland_shell_state: XWaylandShellState,
     pub xwm: Option<X11Wm>,
     pub xwayland_display: Option<u32>,
@@ -142,6 +145,11 @@ impl Villain {
             config,
             space: Space::default(),
             compositor_state: CompositorState::new::<Self>(&display_handle),
+            layer_shell_state: smithay::wayland::shell::wlr_layer::WlrLayerShellState::new::<Self>(
+                &display_handle,
+            ),
+            shell_surfaces: Vec::new(),
+            popups: Default::default(),
             // Advertise only policy that Villain currently implements. Close
             // is a compositor-to-client event, not a WM capability.
             xdg_shell_state: XdgShellState::new_with_capabilities::<Self>(

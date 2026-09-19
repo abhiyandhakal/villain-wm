@@ -80,7 +80,6 @@ pub fn init_winit(
         .insert_source(winit_source, move |event, _, state| match event {
             WinitEvent::Resized { size, .. } => {
                 state.output_size = size.to_logical(1);
-                state.relayout_active_workspace();
                 state.winit.as_ref().unwrap().output.change_current_state(
                     Some(Mode {
                         size,
@@ -90,6 +89,7 @@ pub fn init_winit(
                     None,
                     None,
                 );
+                state.relayout_active_workspace();
                 state.request_repaint();
             }
             WinitEvent::Input(InputEvent::Keyboard { event }) => {

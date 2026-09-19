@@ -12,6 +12,7 @@ mod frame_clock;
 mod handlers;
 mod ipc;
 mod keybinds;
+mod layer_shell;
 mod render;
 mod session;
 mod state;
@@ -65,6 +66,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     event_loop.run(None, &mut state, |state| {
         state.reap_children();
         state.space.refresh();
+        state.popups.cleanup();
         let _ = state.display_handle.flush_clients();
         state.render_if_needed();
     })?;
