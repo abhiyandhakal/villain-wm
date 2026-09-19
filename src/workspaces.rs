@@ -974,15 +974,36 @@ impl Villain {
         }
         let surface = self.exclusive_layer_focus().unwrap_or(surface);
         if self.keyboard.current_focus().as_ref() != Some(&surface) {
+            // Compositor shortcuts are intercepted, so Smithay's forwarded
+            // key set does not contain the keys that are still held.  Moving
+            // keyboard focus now would send the new client a modifier state
+            // without the matching key press/release lifecycle.  Wait until
+            // the shortcut is released and the keyboard state is neutral.
+            if !self.suppressed_keys.is_empty() {
+                self.pending_focus_restore = true;
+                return true;
+            }
             self.keyboard
                 .clone()
                 .set_focus(self, Some(surface), SERIAL_COUNTER.next_serial());
+            self.pending_focus_restore = false;
         }
         true
     }
 
     pub fn restore_active_workspace_focus(&mut self) {
-        if !self.host_focused || self.keyboard.is_grabbed() || self.active_focus_is_valid() {
+        self.restore_active_workspace_focus_inner(false);
+    }
+
+    fn restore_active_workspace_focus_inner(&mut self, force: bool) {
+        if !self.host_focused
+            || self.keyboard.is_grabbed()
+            || (!force && self.active_focus_is_valid())
+        {
+            return;
+        }
+        if !self.suppressed_keys.is_empty() {
+            self.pending_focus_restore = true;
             return;
         }
         if let Some(window) = self.last_visible_window(self.active_workspace) {
@@ -991,6 +1012,19 @@ impl Villain {
             self.keyboard
                 .clone()
                 .set_focus(self, None, SERIAL_COUNTER.next_serial());
+            self.pending_focus_restore = false;
+        }
+    }
+
+    /// Apply a focus transition postponed while a compositor shortcut was held.
+    pub fn flush_pending_focus(&mut self) {
+        if self.pending_focus_restore
+            && self.suppressed_keys.is_empty()
+            && self.host_focused
+            && !self.keyboard.is_grabbed()
+        {
+            self.pending_focus_restore = false;
+            self.restore_active_workspace_focus_inner(true);
         }
     }
 
