@@ -354,6 +354,7 @@ pub fn handle_keyboard_event<B: InputBackend>(
         }
         None => {}
     }
+    state.flush_pending_focus();
 }
 
 #[cfg(test)]
