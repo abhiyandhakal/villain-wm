@@ -241,7 +241,8 @@ pub fn init(
                 tty.active = true;
                 tty.damage = OutputDamageTracker::from_output(&tty.output);
                 state.host_focused = true;
-                state.refresh_pointer(0);
+                state.refresh_pointer_surface(0);
+                state.restore_active_workspace_focus();
                 state.request_repaint();
                 tracing::info!("TTY session resumed");
             }

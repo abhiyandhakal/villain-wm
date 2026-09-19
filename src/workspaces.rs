@@ -14,6 +14,8 @@ use villain_ipc::{WindowId, WindowInfo, WorkspaceInfo};
 #[derive(Default)]
 pub struct Workspace {
     windows: Vec<WorkspaceWindow>,
+    /// Most-recently-focused managed windows, oldest first.
+    focus_history: Vec<WindowId>,
     minimized_history: Vec<Window>,
     fullscreen: Option<WindowId>,
 }
@@ -536,8 +538,11 @@ impl Villain {
         });
         self.refresh_window_hints(&window);
         tracing::info!(window = id.0, workspace = index + 1, "window opened");
+        let index = self.workspace_for_window(&window).unwrap_or(index);
+        self.remember_focused_window(&window);
         if index == self.active_workspace {
             self.relayout_active_workspace();
+            self.focus_managed_window(&window);
         }
     }
 
@@ -563,6 +568,7 @@ impl Villain {
         if index >= self.workspaces.len() {
             return;
         }
+        self.remember_current_window_focus();
         if !self
             .pointer
             .grab_start_data()
@@ -629,26 +635,10 @@ impl Villain {
         {
             self.release_pointer_buttons();
         }
-        self.refresh_pointer(0);
-
-        // A workspace switch or a newly-created window can happen while the
-        // pointer is outside the compositor's current hit-test target. Keep
-        // the seat usable in that case by assigning keyboard focus to the
-        // first visible window instead of leaving focus on an unmapped surface.
-        if self.host_focused
-            && self.keyboard.current_focus().is_none()
-            && let Some(window) = self.workspaces[self.active_workspace]
-                .windows
-                .iter()
-                .find(|entry| self.space.element_location(&entry.window).is_some())
-                .map(|entry| entry.window.clone())
-            && let Some(surface) = KeyboardFocus::for_window(&window)
-        {
-            Self::set_activated(&window, true);
-            self.keyboard
-                .clone()
-                .set_focus(self, Some(surface), SERIAL_COUNTER.next_serial());
-        }
+        // Workspace transitions must not let the stale pointer location choose
+        // a different application before the workspace focus policy runs.
+        self.refresh_pointer_surface(0);
+        self.restore_active_workspace_focus();
     }
 
     pub fn close_focused_window(&mut self) -> bool {
@@ -761,13 +751,15 @@ impl Villain {
         let Some(surface) = surface else {
             return Some(false);
         };
-        for entry in &self.workspaces[self.active_workspace].windows {
-            let activated = entry.id == id;
-            Self::set_activated(&entry.window, activated);
+        let window = self.workspaces[self.active_workspace]
+            .windows
+            .iter()
+            .find(|entry| entry.id == id)
+            .map(|entry| entry.window.clone());
+        if let Some(window) = window {
+            debug_assert_eq!(KeyboardFocus::for_window(&window), Some(surface));
+            self.focus_managed_window(&window);
         }
-        let keyboard = self.keyboard.clone();
-        let surface = self.exclusive_layer_focus().unwrap_or(surface);
-        keyboard.set_focus(self, Some(surface), SERIAL_COUNTER.next_serial());
         Some(true)
     }
 
@@ -870,6 +862,136 @@ impl Villain {
             .iter()
             .find(|entry| KeyboardFocus::for_window(&entry.window).as_ref() == Some(&focused))
             .map(|entry| entry.window.clone())
+    }
+
+    fn remember_focused_window(&mut self, window: &Window) {
+        for workspace in &mut self.workspaces {
+            let Some(id) = workspace
+                .windows
+                .iter()
+                .find(|entry| entry.window == *window)
+                .map(|entry| entry.id)
+            else {
+                continue;
+            };
+            workspace.focus_history.retain(|candidate| *candidate != id);
+            workspace.focus_history.push(id);
+            return;
+        }
+    }
+
+    fn remember_current_window_focus(&mut self) {
+        let Some(focus) = self.keyboard.current_focus() else {
+            return;
+        };
+        let window = self
+            .workspaces
+            .iter()
+            .flat_map(|workspace| workspace.windows.iter())
+            .find(|entry| KeyboardFocus::for_window(&entry.window).as_ref() == Some(&focus))
+            .map(|entry| entry.window.clone());
+        if let Some(window) = window {
+            self.remember_focused_window(&window);
+        }
+    }
+
+    fn window_id(&self, window: &Window) -> Option<WindowId> {
+        self.workspaces
+            .iter()
+            .flat_map(|workspace| workspace.windows.iter())
+            .find(|entry| entry.window == *window)
+            .map(|entry| entry.id)
+    }
+
+    fn window_is_visible(&self, index: usize, id: WindowId) -> bool {
+        let Some(entry) = self.workspaces[index]
+            .windows
+            .iter()
+            .find(|entry| entry.id == id)
+        else {
+            return false;
+        };
+        self.workspace_layout(index)
+            .into_iter()
+            .any(|(window, _, _, _, visible)| visible && window == entry.window)
+    }
+
+    fn last_visible_window(&self, index: usize) -> Option<Window> {
+        let history = self.workspaces[index].focus_history.iter().rev().copied();
+        for id in history {
+            if self.window_is_visible(index, id) {
+                return self.workspaces[index]
+                    .windows
+                    .iter()
+                    .find(|entry| entry.id == id)
+                    .map(|entry| entry.window.clone());
+            }
+        }
+        self.workspaces[index]
+            .windows
+            .iter()
+            .rev()
+            .find(|entry| self.window_is_visible(index, entry.id))
+            .map(|entry| entry.window.clone())
+    }
+
+    fn active_focus_is_valid(&self) -> bool {
+        let Some(focus) = self.keyboard.current_focus() else {
+            return false;
+        };
+        if self
+            .exclusive_layer_focus()
+            .as_ref()
+            .is_some_and(|layer| layer == &focus)
+        {
+            return true;
+        }
+        self.workspaces[self.active_workspace]
+            .windows
+            .iter()
+            .any(|entry| {
+                self.window_is_visible(self.active_workspace, entry.id)
+                    && KeyboardFocus::for_window(&entry.window).as_ref() == Some(&focus)
+            })
+    }
+
+    fn focus_managed_window(&mut self, window: &Window) -> bool {
+        let Some(index) = self.workspace_for_window(window) else {
+            return false;
+        };
+        let Some(id) = self.window_id(window) else {
+            return false;
+        };
+        if index != self.active_workspace || !self.window_is_visible(index, id) {
+            return false;
+        }
+        let Some(surface) = KeyboardFocus::for_window(window) else {
+            return false;
+        };
+        self.remember_focused_window(window);
+        for entry in &self.workspaces[self.active_workspace].windows {
+            Self::set_activated(&entry.window, entry.window == *window);
+        }
+        let surface = self.exclusive_layer_focus().unwrap_or(surface);
+        if self.keyboard.current_focus().as_ref() != Some(&surface) {
+            self.keyboard
+                .clone()
+                .set_focus(self, Some(surface), SERIAL_COUNTER.next_serial());
+        }
+        true
+    }
+
+    pub fn restore_active_workspace_focus(&mut self) {
+        if !self.host_focused || self.keyboard.is_grabbed() || self.active_focus_is_valid() {
+            return;
+        }
+        if let Some(window) = self.last_visible_window(self.active_workspace) {
+            self.focus_managed_window(&window);
+        } else if self.keyboard.current_focus().is_some() {
+            self.keyboard
+                .clone()
+                .set_focus(self, None, SERIAL_COUNTER.next_serial());
+        }
     }
 
     fn window_for_toplevel(&self, surface: &ToplevelSurface) -> Option<Window> {
@@ -984,6 +1106,16 @@ impl Villain {
                         KeyboardFocus::for_window(window)
                     }
                 });
+        let focused_window = keyboard_surface.as_ref().and_then(|focus| {
+            self.workspaces
+                .iter()
+                .flat_map(|workspace| workspace.windows.iter())
+                .find(|entry| KeyboardFocus::for_window(&entry.window).as_ref() == Some(focus))
+                .map(|entry| entry.window.clone())
+        });
+        if let Some(window) = focused_window.as_ref() {
+            self.remember_focused_window(window);
+        }
         if self.keyboard.current_focus() != keyboard_surface {
             for entry in &self.workspaces[self.active_workspace].windows {
                 let activated = keyboard_surface.as_ref().is_some_and(|surface| {
@@ -1089,7 +1221,7 @@ impl Villain {
             let removed: Vec<_> = workspace
                 .windows
                 .extract_if(.., |entry| &entry.window == target)
-                .map(|entry| entry.window)
+                .map(|entry| (entry.id, entry.window))
                 .collect();
             if !workspace
                 .windows
@@ -1098,8 +1230,9 @@ impl Villain {
             {
                 workspace.fullscreen = None;
             }
-            for window in removed {
+            for (id, window) in removed {
                 self.space.unmap_elem(&window);
+                workspace.focus_history.retain(|candidate| *candidate != id);
                 workspace
                     .minimized_history
                     .retain(|candidate| candidate != &window);

@@ -161,7 +161,12 @@ pub fn init_winit(
                     state.suppressed_keys.clear();
                     state.pending_modifier = None;
                 }
-                state.refresh_pointer(0);
+                if focused {
+                    state.refresh_pointer_surface(0);
+                    state.restore_active_workspace_focus();
+                } else {
+                    state.refresh_pointer(0);
+                }
             }
             WinitEvent::Redraw => {
                 state.request_repaint();
