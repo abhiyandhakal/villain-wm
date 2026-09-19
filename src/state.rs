@@ -37,6 +37,7 @@ use smithay::{
 
 use crate::config::RuntimeConfig;
 use crate::cursor::CursorState;
+use crate::dispatch::Dispatch;
 use crate::workspaces::Workspace;
 
 /// All mutable compositor state lives here.
@@ -94,6 +95,7 @@ pub struct Villain {
     pub output_size: smithay::utils::Size<i32, smithay::utils::Logical>,
     pub children: Vec<(usize, std::process::Child)>,
     pub suppressed_keys: std::collections::HashSet<smithay::input::keyboard::Keycode>,
+    pub pending_modifier: Option<(smithay::backend::input::Keycode, Dispatch)>,
     pub host_focused: bool,
     pub pressed_buttons: std::collections::HashSet<u32>,
     pub repaint_needed: bool,
@@ -183,6 +185,7 @@ impl Villain {
             output_size: (800, 600).into(),
             children: Vec::new(),
             suppressed_keys: Default::default(),
+            pending_modifier: None,
             host_focused: true,
             pressed_buttons: Default::default(),
             repaint_needed: true,
