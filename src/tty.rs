@@ -344,7 +344,6 @@ fn process_input(event: InputEvent<LibinputInputBackend>, state: &mut Villain) {
             state.refresh_pointer(event.time_msec());
         }
         InputEvent::PointerButton { event } => {
-            state.clear_explicit_focus_override();
             match event.state() {
                 ButtonState::Pressed => {
                     state.pressed_buttons.insert(event.button_code());
@@ -355,7 +354,7 @@ fn process_input(event: InputEvent<LibinputInputBackend>, state: &mut Villain) {
                     }
                 }
             }
-            state.refresh_pointer(event.time_msec());
+            state.refresh_pointer_and_focus(event.time_msec());
             let pointer = state.pointer.clone();
             pointer.button(
                 state,

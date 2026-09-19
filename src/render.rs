@@ -100,7 +100,6 @@ pub fn init_winit(
                 state.refresh_pointer(event.time_msec());
             }
             WinitEvent::Input(InputEvent::PointerButton { event }) => {
-                state.clear_explicit_focus_override();
                 match event.state() {
                     smithay::backend::input::ButtonState::Pressed => {
                         state.pressed_buttons.insert(event.button_code());
@@ -111,7 +110,7 @@ pub fn init_winit(
                         }
                     }
                 }
-                state.refresh_pointer(event.time_msec());
+                state.refresh_pointer_and_focus(event.time_msec());
                 let pointer = state.pointer.clone();
                 pointer.button(
                     state,

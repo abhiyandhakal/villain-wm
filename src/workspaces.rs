@@ -969,7 +969,6 @@ impl Villain {
             return false;
         };
         self.remember_focused_window(window);
-        self.explicit_focus_location = Some(self.pointer_location);
         for entry in &self.workspaces[self.active_workspace].windows {
             Self::set_activated(&entry.window, entry.window == *window);
         }
@@ -1061,29 +1060,30 @@ impl Villain {
             .cloned()
     }
 
-    pub fn focus_window_at_pointer(&mut self) {
+    fn focus_layer_at_pointer(&mut self) -> bool {
         if let Some(focus) = self.exclusive_layer_focus() {
             self.focus_layer(focus);
-            return;
+            return true;
         }
         if self.host_focused
             && let Some((_, _, Some(focus))) = self.layer_under_pointer(true)
         {
             self.focus_layer(focus);
-            return;
+            return true;
         }
         if self.host_focused
             && self.space.element_under(self.pointer_location).is_none()
             && let Some((_, _, Some(focus))) = self.layer_under_pointer(false)
         {
             self.focus_layer(focus);
-            return;
+            return true;
         }
-        if let Some(location) = self.explicit_focus_location {
-            if location == self.pointer_location {
-                return;
-            }
-            self.explicit_focus_location = None;
+        false
+    }
+
+    pub fn focus_window_at_pointer(&mut self) {
+        if self.focus_layer_at_pointer() {
+            return;
         }
         let hit = self
             .space
@@ -1154,13 +1154,23 @@ impl Villain {
     pub fn refresh_pointer(&mut self, time: u32) {
         self.request_repaint();
         self.refresh_pointer_surface(time);
-        if !self.pointer.is_grabbed() {
-            self.focus_window_at_pointer();
+        if !self.host_focused {
+            if self.keyboard.current_focus().is_some() {
+                self.keyboard
+                    .clone()
+                    .set_focus(self, None, SERIAL_COUNTER.next_serial());
+            }
+        } else if !self.pointer.is_grabbed() {
+            self.focus_layer_at_pointer();
         }
     }
 
-    pub fn clear_explicit_focus_override(&mut self) {
-        self.explicit_focus_location = None;
+    pub fn refresh_pointer_and_focus(&mut self, time: u32) {
+        self.request_repaint();
+        self.refresh_pointer_surface(time);
+        if !self.pointer.is_grabbed() {
+            self.focus_window_at_pointer();
+        }
     }
 
     pub fn refresh_pointer_surface(&mut self, time: u32) {
