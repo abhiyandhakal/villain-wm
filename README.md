@@ -260,6 +260,26 @@ These behaviors apply to both native Wayland and XWayland applications.
 window state. `floating` describes the window's normal layout, including while
 it is temporarily fullscreen.
 
+### Desktop layers
+
+Villain supports `wlr-layer-shell` on both the nested and TTY backends. Launchers
+such as Wofi can use their native layer-shell mode (`wofi --show drun`), and
+panels, notifications, and wallpapers belong to the output across workspace
+switches. These surfaces are excluded from ordinary window lists and tiling.
+
+The background and bottom layers render below application windows; top and
+overlay render above them, including fullscreen applications. Anchors, margins,
+requested sizes, and exclusive zones control placement. Panels with an exclusive
+zone reserve space for tiled windows; fullscreen windows still fill the output.
+
+Keyboard interactivity is honored: noninteractive layers do not take keyboard
+focus, on-demand layers follow Villain's pointer focus policy, and exclusive
+layers on top/overlay retain keyboard focus until dismissed. Layer popups are
+configured, rendered, and hit-tested, including outside their parent's bounds;
+valid pointer-initiated popup grabs survive workspace switches. Unmapping or
+closing a layer releases its reserved space and popup grabs. Layer surfaces and
+their popups receive paced frame callbacks through the shared frame clock.
+
 ### Current controls
 
 The temporary mod key is `Alt` while Villain is being tested.

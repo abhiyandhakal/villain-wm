@@ -60,6 +60,13 @@ impl Villain {
                     for window in state.space.elements() {
                         window.send_frame(&output, now, None, |_, _| Some(output.clone()));
                     }
+                    for entry in &state.shell_surfaces {
+                        if entry.mapped && entry.output == output {
+                            entry
+                                .layer
+                                .send_frame(&output, now, None, |_, _| Some(output.clone()));
+                        }
+                    }
                     state.cursor.send_frame(&output, now);
                     TimeoutAction::Drop
                 });

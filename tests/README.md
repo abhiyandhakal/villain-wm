@@ -17,7 +17,10 @@ its socket. For a direct DRM test, run it in the active Villain TTY session.
 The native Wayland window-request regression and XWayland input regression use
 private headless compositors. They exercise fullscreen transitions, restoration,
 fixed-size hints, parent dialogs, background requests, and pointer move/resize
-grabs. XWayland must be installed for its test. Run both with:
+grabs. XWayland must be installed for its test. The layer-shell regression checks the initial configure handshake, buffer mapping,
+reserved panel space, fullscreen geometry, focus modes, workspace independence,
+popups outside parent bounds, popup grabs, unmapping, remapping, and destruction.
+Run all three with:
 
 ```sh
 test_runtime=$(mktemp -d)

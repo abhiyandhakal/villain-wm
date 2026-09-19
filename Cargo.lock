@@ -1864,6 +1864,7 @@ dependencies = [
  "villain-ipc",
  "wayland-client",
  "wayland-protocols",
+ "wayland-protocols-wlr",
  "xcursor",
 ]
 

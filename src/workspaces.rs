@@ -284,7 +284,8 @@ impl Villain {
             .iter()
             .filter(|entry| !entry.minimized && entry.floating.is_none())
             .count();
-        let mut tiles = master_stack_layout(self.output_size, count).into_iter();
+        let area = self.usable_area();
+        let mut tiles = master_stack_layout(area.size, count).into_iter();
         let mut result = Vec::new();
         for entry in &workspace.windows {
             let is_fullscreen = workspace.fullscreen == Some(entry.id);
@@ -293,7 +294,7 @@ impl Villain {
                 constrain_geometry(rect, self.output_size, min, max)
             } else if !entry.minimized {
                 let (loc, size) = tiles.next().unwrap();
-                Rectangle::new(loc, size)
+                Rectangle::new(loc + area.loc, size)
             } else {
                 Rectangle::from_size(self.output_size)
             };
@@ -503,7 +504,7 @@ impl Villain {
     /// state actually changed. Sending an activation configure for every
     /// window during every relayout creates a burst of competing configure
     /// serials while the workspace is being switched.
-    fn set_activated(window: &Window, activated: bool) {
+    pub(crate) fn set_activated(window: &Window, activated: bool) {
         if window.set_activated(activated) {
             Self::send_pending_configure(window);
         }
@@ -562,7 +563,14 @@ impl Villain {
         if index >= self.workspaces.len() {
             return;
         }
-        self.release_pointer_buttons();
+        if !self
+            .pointer
+            .grab_start_data()
+            .and_then(|start| start.focus)
+            .is_some_and(|(surface, _)| self.layer_surface_visible(&surface))
+        {
+            self.release_pointer_buttons();
+        }
         let old: Vec<_> = self
             .workspaces
             .iter()
@@ -577,6 +585,7 @@ impl Villain {
     }
 
     pub fn relayout_active_workspace(&mut self) {
+        self.arrange_layers();
         let old: Vec<_> = self
             .workspaces
             .iter()
@@ -612,9 +621,10 @@ impl Villain {
                     std::iter::successors(Some(surface), smithay::wayland::compositor::get_parent)
                         .last()
                         .unwrap();
-                !self
-                    .window_for_surface(&root)
-                    .is_some_and(|window| self.space.element_location(&window).is_some())
+                !self.layer_surface_visible(&root)
+                    && !self
+                        .window_for_surface(&root)
+                        .is_some_and(|window| self.space.element_location(&window).is_some())
             })
         {
             self.release_pointer_buttons();
@@ -659,7 +669,7 @@ impl Villain {
         }
     }
 
-    pub fn apply_window_action(&mut self, window: &Window, action: WindowAction) {
+    pub(crate) fn apply_window_action(&mut self, window: &Window, action: WindowAction) {
         match action {
             WindowAction::Close => {
                 if let Some(surface) = window.toplevel() {
@@ -756,6 +766,7 @@ impl Villain {
             Self::set_activated(&entry.window, activated);
         }
         let keyboard = self.keyboard.clone();
+        let surface = self.exclusive_layer_focus().unwrap_or(surface);
         keyboard.set_focus(self, Some(surface), SERIAL_COUNTER.next_serial());
         Some(true)
     }
@@ -928,6 +939,23 @@ impl Villain {
     }
 
     pub fn focus_window_at_pointer(&mut self) {
+        if let Some(focus) = self.exclusive_layer_focus() {
+            self.focus_layer(focus);
+            return;
+        }
+        if self.host_focused
+            && let Some((_, _, Some(focus))) = self.layer_under_pointer(true)
+        {
+            self.focus_layer(focus);
+            return;
+        }
+        if self.host_focused
+            && self.space.element_under(self.pointer_location).is_none()
+            && let Some((_, _, Some(focus))) = self.layer_under_pointer(false)
+        {
+            self.focus_layer(focus);
+            return;
+        }
         let hit = self
             .space
             .element_under(self.pointer_location)
@@ -998,14 +1026,24 @@ impl Villain {
             .element_under(self.pointer_location)
             .map(|(window, location)| (window.clone(), location));
         let focus = if self.host_focused {
-            hit.and_then(|(window, origin)| {
-                window
-                    .surface_under(
-                        self.pointer_location - origin.to_f64(),
-                        WindowSurfaceType::TOPLEVEL | WindowSurfaceType::SUBSURFACE,
-                    )
-                    .map(|(surface, location)| (surface, location.to_f64() + origin.to_f64()))
-            })
+            self.layer_under_pointer(true)
+                .map(|(surface, origin, _)| (surface, origin))
+                .or_else(|| {
+                    hit.and_then(|(window, origin)| {
+                        window
+                            .surface_under(
+                                self.pointer_location - origin.to_f64(),
+                                WindowSurfaceType::ALL,
+                            )
+                            .map(|(surface, location)| {
+                                (surface, location.to_f64() + origin.to_f64())
+                            })
+                    })
+                })
+                .or_else(|| {
+                    self.layer_under_pointer(false)
+                        .map(|(surface, origin, _)| (surface, origin))
+                })
         } else {
             None
         };

@@ -108,3 +108,20 @@ impl KeyboardTarget<Villain> for KeyboardFocus {
         }
     }
 }
+
+impl From<smithay::desktop::PopupKind> for KeyboardFocus {
+    fn from(popup: smithay::desktop::PopupKind) -> Self {
+        Self::Wayland(popup.wl_surface().clone())
+    }
+}
+
+impl From<KeyboardFocus> for WlSurface {
+    fn from(focus: KeyboardFocus) -> Self {
+        match focus {
+            KeyboardFocus::Wayland(surface) => surface,
+            KeyboardFocus::X11(surface) => {
+                surface.wl_surface().expect("popup grab has a mapped root")
+            }
+        }
+    }
+}
