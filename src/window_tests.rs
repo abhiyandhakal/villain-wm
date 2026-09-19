@@ -180,6 +180,7 @@ fn wayland_floating_and_fullscreen_requests() {
             // letting that stale hit-test win.
             state.switch_workspace(1);
             state.switch_workspace(0);
+            state.refresh_pointer(0);
             assert!(find(state, "other").focused);
         });
         assert_eq!(

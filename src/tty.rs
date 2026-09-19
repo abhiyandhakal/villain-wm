@@ -344,6 +344,7 @@ fn process_input(event: InputEvent<LibinputInputBackend>, state: &mut Villain) {
             state.refresh_pointer(event.time_msec());
         }
         InputEvent::PointerButton { event } => {
+            state.clear_explicit_focus_override();
             match event.state() {
                 ButtonState::Pressed => {
                     state.pressed_buttons.insert(event.button_code());

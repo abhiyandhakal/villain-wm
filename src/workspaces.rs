@@ -969,6 +969,7 @@ impl Villain {
             return false;
         };
         self.remember_focused_window(window);
+        self.explicit_focus_location = Some(self.pointer_location);
         for entry in &self.workspaces[self.active_workspace].windows {
             Self::set_activated(&entry.window, entry.window == *window);
         }
@@ -1078,6 +1079,12 @@ impl Villain {
             self.focus_layer(focus);
             return;
         }
+        if let Some(location) = self.explicit_focus_location {
+            if location == self.pointer_location {
+                return;
+            }
+            self.explicit_focus_location = None;
+        }
         let hit = self
             .space
             .element_under(self.pointer_location)
@@ -1150,6 +1157,10 @@ impl Villain {
         if !self.pointer.is_grabbed() {
             self.focus_window_at_pointer();
         }
+    }
+
+    pub fn clear_explicit_focus_override(&mut self) {
+        self.explicit_focus_location = None;
     }
 
     pub fn refresh_pointer_surface(&mut self, time: u32) {
